@@ -34,7 +34,7 @@ contract Router {
         amounts = getAmountsOut(amountIn, path);
         require(amounts[amounts.length - 1] >= amountOutMin, 'INSUFFICIENT_OUTPUT_AMOUNT');
 
-        IERC20(path[0]).transferFrom(msg.sender, dex, amountIn);
+        IERC20(path[0]).transferFrom(msg.sender, address(this), amountIn);
         uint256 beforeBal = IERC20(path[0]).balanceOf(address(this));
 
         for(uint i; i < path.length - 1; i++) {
