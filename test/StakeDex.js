@@ -274,7 +274,7 @@ describe("StakeDex", function() {
     expect(balance2.toString()).to.eq('1502999985029999850')
 
     let prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address)
-    expect(prices.length).to.eq(0)
+    expect(prices.length).to.eq(1)
   })
 
   it("StakeDex:removeLiquidity:2", async() => {
@@ -295,13 +295,13 @@ describe("StakeDex", function() {
 
     await this.Dex.removeLiquidity(this.TokenA.address, this.TokenB.address, price1, { from: investor1 });
     prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address)
-    expect(prices[0].toString()).to.eq(price2.toString())
+    expect(prices[0].toString()).to.eq(price1.toString())
 
     await this.Dex.removeLiquidity(this.TokenA.address, this.TokenB.address, price2, { from: investor1 });
 
 
     prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address)
-    expect(prices.length).to.eq(0)
+    expect(prices.length).to.eq(2)
 
   })
 

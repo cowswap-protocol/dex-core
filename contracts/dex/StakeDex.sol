@@ -59,10 +59,10 @@ contract StakeDex {
     address public gov;
 
     uint public feeForTake = 20; // 0.2% 
-    uint public feeForProvide = 10; // 0.10% to makers
-    uint public feeForReserve = 10; // 0.10% reserved
+    uint public feeForProvide = 12; // 0.10% to makers
+    uint public feeForReserve = 8; // 0.10% reserved
 
-    uint256 public amountInMin = 500000;  // base is 10000
+    uint256 public amountInMin = 0; //500000;  // base is 10000
     uint256 public amountInMax = 10000000; // base is 10000
 
 
@@ -132,68 +132,7 @@ contract StakeDex {
         amountInMin = min_;
         amountInMax = max_;
     }
-
-    function distributeTradeRewardToTaker(address tokenIn, address tokenOut, uint256 amountIn, address taker) internal {
-        if(address(rewardToken) == address(0x0)) {
-            return;
-        }
-
-        uint256 freeBalance = rewardToken.balanceOf(address(this)).sub(makerReservedRewards);
-
-        if(freeBalance == 0) {
-            return;
-        }
-        uint256 exp = 10 ** uint256(ERC20(tokenIn).decimals());
-        uint256 reward = amountIn.mul(miningRate[tokenIn][tokenOut]).div(exp).div(1e18);
-
-        if(reward == 0) {
-            return;
-        }
-
-        if(reward > freeBalance) {
-            reward = freeBalance;
-        }
-
-        uint256 toMaker = reward.mul(30).div(100); // 30% to maker
-        uint256 toTaker = reward.sub(toMaker);// 70% to taker
-        makerReservedRewards = makerReservedRewards.add(toMaker);
-        rewardToken.transfer(taker, toTaker);
-        rewardToken.transfer(feeTo, reward.div(10)); // 1/10 to dev
-    }
-
-    function distributeTradeRewardToMaker(address tokenIn, address tokenOut , uint256 amountOut, address maker) internal {
-        if(address(rewardToken) == address(0x0)) {
-            return;
-        }
-
-        uint256 exp = 10 ** uint256(ERC20(tokenOut).decimals());
-        uint256 reward = amountOut.mul(miningRate[tokenOut][tokenIn]).div(exp).div(1e18);
-
-        if(reward == 0) {
-            return;
-        }
-
-        uint256 toMaker = reward.mul(30).div(100); // 30% to maker
-        uint256 freeBalance = rewardToken.balanceOf(address(this));
-
-        if(freeBalance == 0) {
-            return;
-        }
-
-        if(toMaker > freeBalance) {
-            rewardToken.transfer(maker, freeBalance);    
-        } else {
-            rewardToken.transfer(maker, toMaker);
-        }
-    }
-
-    // withdraw reward tokens in case of migration
-    function migrateRewardToken(address to_) public onlyGov {
-        uint256 bal = rewardToken.balanceOf(address(this));
-        rewardToken.transfer(to_, bal);
-    }
-
-
+    
     function createPair(address tokenA, address tokenB) public {
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
         if(pairs[token0][token1] == 0) {
@@ -459,8 +398,6 @@ contract StakeDex {
             IERC20(tokenOut).transfer(account, filled.add(pending.mul(accumlatedRateFee).div(AMP)));
             userOrders[account][id][price] = pending.sub(filled);
             emit Redeem(account, tokenIn, tokenOut, price, filled, now);
-
-            distributeTradeRewardToMaker(tokenOut, tokenIn, filled, account);
         }
     }
 
@@ -537,8 +474,7 @@ contract StakeDex {
         address tokenIn, 
         address tokenOut, 
         uint amountIn, 
-        uint amountOutMin,
-        address to
+        uint amountOutMin
     ) public returns(uint256 amountOut)
     {   
         uint id = fetchPairId(tokenOut, tokenIn);
@@ -567,7 +503,6 @@ contract StakeDex {
         IERC20(tokenIn).transfer(feeTo, totalFee);
         IERC20(tokenOut).transfer(msg.sender, amountOut);
 
-        distributeTradeRewardToTaker(tokenIn, tokenOut, total.sub(amountIn), to);
         emit Swap(msg.sender, tokenIn, tokenOut, amountIn, amountOut, now);
     }
 

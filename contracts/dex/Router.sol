@@ -39,7 +39,7 @@ contract Router {
 
         for(uint i; i < path.length - 1; i++) {
             IERC20(path[i]).approve(dex, amounts[i]);
-            StakeDex(dex).swap(path[i], path[i + 1], amounts[i], 0, to);
+            StakeDex(dex).swap(path[i], path[i + 1], amounts[i], 0);
         }
         uint256 afterBal = IERC20(path[0]).balanceOf(address(this));
 
@@ -68,7 +68,7 @@ contract Router {
 
         for(uint i; i < path.length - 1; i++) {
             IERC20(path[i]).approve(dex, amounts[i]);
-            StakeDex(dex).swap(path[i], path[i + 1], amounts[i], 0, to);
+            StakeDex(dex).swap(path[i], path[i + 1], amounts[i], 0);
         }
         
         
