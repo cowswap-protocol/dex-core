@@ -9,7 +9,6 @@ import "./IERC20.sol";
 contract StakeDex {
     using SafeMath for uint256;
 
-    uint public pairId = 0;
     uint public AMP = 1e18;
 
     struct Rate {
@@ -50,19 +49,20 @@ contract StakeDex {
     uint public feeForProvide = 12; // 0.10% to makers
     uint public feeForReserve = 8; // 0.10% reserved
 
-    uint256 public amountInMin = 0; //500000;  // base is 10000
-    uint256 public amountInMax = 10000000; // base is 10000
+    // uint256 public amountInMin = 0; //500000;  // base is 10000
+    // uint256 public amountInMax = 10000000; // base is 10000
 
     struct Order {
         uint256 pendingOut;
         uint256 rateRedeemedIndex;
     }
-    
 
     // user => id => price => Order
     mapping (address => mapping (uint256 => mapping (uint256 => Order))) public userOrders;
     
 
+    mapping (address => uint256) public reserves;
+    
 
     event AddLiquidity(address indexed sender, address tokenIn, address tokenOut, uint price, uint amountIn);
     event RemoveLiquidity(address indexed sender, address tokenIn, address tokenOut, uint price, uint amountReturn);
@@ -150,7 +150,9 @@ contract StakeDex {
 
         uint256 amountReturn = getAmountOut(id, amountOut, price);
         if(amountReturn > 0) {
-            IERC20(tokenIn).transfer(msg.sender, amountReturn);    
+            IERC20(tokenIn).transfer(msg.sender, amountReturn);
+
+            _update(tokenIn);
         }
 
         emit RemoveLiquidity(msg.sender, tokenIn, tokenOut, price, amountReturn);
@@ -160,10 +162,21 @@ contract StakeDex {
         // }
     }
 
-    function calcAmountInLimit(address token) public view returns(uint256 min, uint256 max) {
-        uint256 dec = uint256(IERC20(token).decimals());
-        min = amountInMin.mul(10 ** dec).div(10000);
-        max = amountInMax.mul(10 ** dec).div(10000);
+    // function calcAmountInLimit(address token) public view returns(uint256 min, uint256 max) {
+    //     uint256 dec = uint256(IERC20(token).decimals());
+    //     min = amountInMin.mul(10 ** dec).div(10000);
+    //     max = amountInMax.mul(10 ** dec).div(10000);
+    // }
+
+    function _update(address token) internal {
+        reserves[token] = IERC20(token).balanceOf(address(this));
+    }
+
+    function _transferFrom(address token, address from, uint256 amount) internal returns(uint256) {
+        uint256 beforeBalance = IERC20(token).balanceOf(address(this));
+        IERC20(token).transferFrom(from, address(this), amount);
+        uint256 afterBalance = IERC20(token).balanceOf(address(this));
+        return afterBalance.sub(beforeBalance);
     }
 
     function addLiquidity(
@@ -174,16 +187,14 @@ contract StakeDex {
     ) public lock
     {   
         require(amountIn > 0 && amountOut > 0, "ZERO");
-        // (uint256 min, uint256 max) = calcAmountInLimit(tokenIn);
-        // require(amountIn >= min && amountIn <= max,  "Exceeds Limit");
 
         if(getPairId[tokenIn][tokenOut] == 0) {
             createPair(tokenIn, tokenOut);
         }
-
-
         uint256 id = getPairId[tokenIn][tokenOut];
         Pair storage pair = getPair[id];
+
+        amountIn = _transferFrom(tokenIn, msg.sender, amountIn);
 
         uint256 price;
 
@@ -194,11 +205,6 @@ contract StakeDex {
             price = amountOut.div(10 ** uint(-pair.decimals)).div(amountIn);
             amountOut = price.mul(amountIn).mul(10 ** uint(-pair.decimals));
         }
-
-        IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
-
-
-
 
         // if(userOrders[msg.sender][id][price] > 0) {
         //     redeemTraded(msg.sender, tokenIn, tokenOut, price);
@@ -241,6 +247,8 @@ contract StakeDex {
         //     tradedRateStored[id][price].push(ZERO);
         //     userRateRedeemed[msg.sender][id][price] = size;
         // }
+
+        _update(tokenIn);
 
         emit AddLiquidity(msg.sender, tokenIn, tokenOut, price, amountIn);
     }
@@ -344,77 +352,20 @@ contract StakeDex {
             accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
             accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
             if(rates[i].traded == AMP) {
-                break;    
-            }
-        }
-        uint256 filled = order.pendingOut.mul(accumlatedRate).div(AMP);
-        // uint256 fee = pending.mul(accumlatedRateFee).div(AMP);
-        if(filled > 0) {
-            IERC20(tokenOut).transfer(account, filled.add(order.pendingOut.mul(accumlatedRateFee).div(AMP)));
-            order.pendingOut = order.pendingOut.sub(filled);
-            emit Redeem(account, tokenIn, tokenOut, price, filled);
-        }
-    }
-
-    function getLiquidity(
-        address account, 
-        address tokenIn, 
-        address tokenOut, 
-        uint256 price
-    ) public view returns(uint256 feeRewarded, uint256 filled, uint256 pending) {
-        uint256 id = getPairId[tokenIn][tokenOut];
-
-        // Pair storage pair = getPair[id];
-        Order memory order = userOrders[account][id][price];
-
-        if(order.pendingOut == 0) {
-            return (0, 0, 0);
-        }
-
-        Rate[] memory rates = getPair[id].tradedRateStored[price];
-
-        uint256 accumlatedRate = 0;
-        uint256 accumlatedRateFee = 0;
-        uint256 startIndex = order.rateRedeemedIndex;
-
-        for(uint256 i = startIndex; i < rates.length; i++) {
-            accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
-            accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
-            if(rates[i].traded == AMP) {
                 break;
             }
         }
-        filled = order.pendingOut.mul(accumlatedRate).div(AMP);
-        feeRewarded = order.pendingOut.mul(accumlatedRateFee).div(AMP);
-        pending = order.pendingOut.sub(filled);
-    }
+        uint256 filled = order.pendingOut.mul(accumlatedRate).div(AMP);
+        uint256 fee = order.pendingOut.mul(accumlatedRateFee).div(AMP);
+        if(filled > 0) {
+            IERC20(tokenOut).transfer(account, filled.add(fee));
+            order.pendingOut = order.pendingOut.sub(filled);
 
-    function getAllLiquidities(
-        address account, 
-        address tokenIn, 
-        address tokenOut
-    ) public view returns(uint256[4][] memory, uint256 size) {
-        uint256 id = getPairId[tokenIn][tokenOut];
-        Pair memory pair = getPair[id];
+            _update(tokenOut);
 
-        uint256[4][] memory liqs = new uint256[4][](pair.prices.length);
-
-        uint256 j = 0;
-        for(uint256 i; i < pair.prices.length; i++) {
-            (uint256 feeRewarded, uint256 filled, uint256 pending) = getLiquidity(account, tokenIn, tokenOut, pair.prices[i]);
-            if(feeRewarded == 0 && filled == 0 && pending == 0) {
-                continue;
-            }
-            liqs[j][0] = pair.prices[i];
-            liqs[j][1] = feeRewarded;
-            liqs[j][2] = filled;
-            liqs[j][3] = pending;
-            j++;
+            emit Redeem(account, tokenIn, tokenOut, price, filled);
         }
-
-        return (liqs, j + 1);
     }
-
 
     function redeem(address tokenIn, address tokenOut, uint256 price) public lock {
         uint id = getPairId[tokenIn][tokenOut];
@@ -434,13 +385,15 @@ contract StakeDex {
     function swap(
         address tokenIn, 
         address tokenOut, 
-        uint amountIn, 
-        uint amountOutMin
+        uint amountOutMin,
+        address to
     ) public returns(uint256 amountOut)
     {   
         uint id = getPairId[tokenOut][tokenIn];
 
         Pair storage pair = getPair[id];
+
+        uint256 amountIn = IERC20(tokenIn).balanceOf(address(this)).sub(reserves[tokenIn]);
 
         uint total = amountIn;
         uint totalFee = 0;
@@ -463,9 +416,19 @@ contract StakeDex {
         }
         require(amountOut >= amountOutMin && amountOut > 0, "INSUFFICIENT_OUT_AMOUNT");
 
-        IERC20(tokenIn).transferFrom(msg.sender, address(this), total.sub(amountIn));
+        if(amountIn > 0) {
+            IERC20(tokenIn).transfer(to, amountIn); // refund
+        }
+
+        // IERC20(tokenIn).transferFrom(msg.sender, address(this), total.sub(amountIn));
         IERC20(tokenIn).transfer(feeTo, totalFee);
-        IERC20(tokenOut).transfer(msg.sender, amountOut);
+        // IERC20(tokenOut).transfer(msg.sender, amountOut);
+        if(to != address(this)) {
+            IERC20(tokenOut).transfer(to, amountOut);
+        }
+
+        reserves[tokenOut] = reserves[tokenOut].sub(amountOut);
+        _update(tokenIn);
 
         emit Swap(msg.sender, tokenIn, tokenOut, total.sub(amountIn), amountOut);
     }
@@ -589,5 +552,64 @@ contract StakeDex {
         }
 
         amountReturn = amountIn;
+    }
+
+    function getLiquidity(
+        address account, 
+        address tokenIn, 
+        address tokenOut, 
+        uint256 price
+    ) public view returns(uint256 feeRewarded, uint256 filled, uint256 pending) {
+        uint256 id = getPairId[tokenIn][tokenOut];
+
+        // Pair storage pair = getPair[id];
+        Order memory order = userOrders[account][id][price];
+
+        if(order.pendingOut == 0) {
+            return (0, 0, 0);
+        }
+
+        Rate[] memory rates = getPair[id].tradedRateStored[price];
+
+        uint256 accumlatedRate = 0;
+        uint256 accumlatedRateFee = 0;
+        uint256 startIndex = order.rateRedeemedIndex;
+
+        for(uint256 i = startIndex; i < rates.length; i++) {
+            accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
+            accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
+            if(rates[i].traded == AMP) {
+                break;
+            }
+        }
+        filled = order.pendingOut.mul(accumlatedRate).div(AMP);
+        feeRewarded = order.pendingOut.mul(accumlatedRateFee).div(AMP);
+        pending = order.pendingOut.sub(filled);
+    }
+
+    function getAllLiquidities(
+        address account, 
+        address tokenIn, 
+        address tokenOut
+    ) public view returns(uint256[4][] memory, uint256 size) {
+        uint256 id = getPairId[tokenIn][tokenOut];
+        Pair memory pair = getPair[id];
+
+        uint256[4][] memory liqs = new uint256[4][](pair.prices.length);
+
+        uint256 j = 0;
+        for(uint256 i; i < pair.prices.length; i++) {
+            (uint256 feeRewarded, uint256 filled, uint256 pending) = getLiquidity(account, tokenIn, tokenOut, pair.prices[i]);
+            if(feeRewarded == 0 && filled == 0 && pending == 0) {
+                continue;
+            }
+            liqs[j][0] = pair.prices[i];
+            liqs[j][1] = feeRewarded;
+            liqs[j][2] = filled;
+            liqs[j][3] = pending;
+            j++;
+        }
+
+        return (liqs, j + 1);
     }
 }

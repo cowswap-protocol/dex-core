@@ -34,23 +34,12 @@ contract Router {
         amounts = getAmountsOut(amountIn, path);
         require(amounts[amounts.length - 1] >= amountOutMin, 'INSUFFICIENT_OUTPUT_AMOUNT');
 
-        IERC20(path[0]).transferFrom(msg.sender, address(this), amountIn);
-        uint256 beforeBal = IERC20(path[0]).balanceOf(address(this));
+        IERC20(path[0]).transferFrom(msg.sender, dex, amountIn);
 
         for(uint i; i < path.length - 1; i++) {
-            IERC20(path[i]).approve(dex, amounts[i]);
-            StakeDex(dex).swap(path[i], path[i + 1], amounts[i], 0);
+            address _to = i < path.length - 2 ? dex : to;
+            StakeDex(dex).swap(path[i], path[i + 1], 0, _to);
         }
-        uint256 afterBal = IERC20(path[0]).balanceOf(address(this));
-
-        uint256 traded = beforeBal.sub(afterBal);
-
-        if(amountIn.sub(traded) > 0) {
-            // refund
-            IERC20(path[0]).transfer(to, amountIn.sub(traded));
-        }
-
-        IERC20(path[path.length - 1]).transfer(to, amounts[amounts.length - 1]);
     }
 
     function swapTokensForExactTokens(
@@ -62,17 +51,12 @@ contract Router {
     ) external ensure(deadline) returns (uint[] memory amounts) {
         amounts = getAmountsIn(amountOut, path);
         require(amounts[0] <= amountInMax, 'EXCESSIVE_INPUT_AMOUNT');
-        IERC20(path[0]).transferFrom(msg.sender, address(this), amounts[0]);
-
-        
+        IERC20(path[0]).transferFrom(msg.sender, dex, amounts[0]);
 
         for(uint i; i < path.length - 1; i++) {
-            IERC20(path[i]).approve(dex, amounts[i]);
-            StakeDex(dex).swap(path[i], path[i + 1], amounts[i], 0);
+            address _to = i < path.length - 2 ? dex : to;
+            StakeDex(dex).swap(path[i], path[i + 1], 0, _to);
         }
-        
-        
-        IERC20(path[path.length - 1]).transfer(to, amounts[amounts.length - 1]);
     }
 
 
