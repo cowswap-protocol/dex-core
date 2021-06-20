@@ -1,5 +1,3 @@
 ### DEX contracts
 
-airdrop: 0x1f65f2c048bD2bA8524a75d28cC1Bdd9b090D2C4
-
-cowb: 0xf6dB8F1b6e551Ca3099E4BcB9ce97E69ed3Aa2E8
+This repository contains the core smart contracts for Cowswap Protocol.
