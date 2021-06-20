@@ -4,3 +4,4 @@ node_modules
 .secret
 build
 .DS_Store
+flatten.sh
