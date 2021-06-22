@@ -11,7 +11,6 @@ import "./StakeDex.sol";
 
 contract Router {
     using SafeMath for uint256;
-    // using SafeERC20 for IERC20;
 
     address public dex; 
 

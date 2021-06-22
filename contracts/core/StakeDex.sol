@@ -96,10 +96,10 @@ contract StakeDex {
         feeForReserve = reserve_;
     }
 
-    function setAmountInLimit(uint256 min_, uint256 max_) public onlyGov {
-        amountInMin = min_;
-        amountInMax = max_;
-    }
+    // function setAmountInLimit(uint256 min_, uint256 max_) public onlyGov {
+    //     amountInMin = min_;
+    //     amountInMax = max_;
+    // }
     
     function createPair(address tokenIn, address tokenOut) public {
         getPairId[tokenIn][tokenOut] += 1;
@@ -205,6 +205,8 @@ contract StakeDex {
             price = amountOut.div(10 ** uint(-pair.decimals)).div(amountIn);
             amountOut = price.mul(amountIn).mul(10 ** uint(-pair.decimals));
         }
+
+        require(price > 0, "Zero Price");
 
         // if(userOrders[msg.sender][id][price] > 0) {
         //     redeemTraded(msg.sender, tokenIn, tokenOut, price);
