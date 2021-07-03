@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.6.12;
-pragma experimental ABIEncoderV2;
+
 
 import "@openzeppelin/contracts/math/SafeMath.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "./IERC20.sol";
 
 
-contract StakeDex {
+contract StakeDex is ERC721 {
     using SafeMath for uint256;
 
     uint public AMP = 1e18;
@@ -35,33 +36,42 @@ contract StakeDex {
         mapping (uint256 => uint256) depth;
         // price => Rate[]
         mapping (uint256 => Rate[]) tradedRateStored;
+
+        address tokenIn;
+        address tokenOut;
     }
 
     mapping (uint256 => Pair) public getPair;
     mapping (address => mapping (address => uint)) public getPairId;
     
-    int8 public defaultDecimals = 8;
+    int8 public defaultDecimals = 10;
 
     address public feeTo;
     address public gov;
 
     uint public feeForTake = 20; // 0.2% 
-    uint public feeForProvide = 12; // 0.10% to makers
-    uint public feeForReserve = 8; // 0.10% reserved
+    uint public feeForProvide = 10; // 0.10% to makers
+    uint public feeForReserve = 10; // 0.10% reserved
 
-    // uint256 public amountInMin = 0; //500000;  // base is 10000
-    // uint256 public amountInMax = 10000000; // base is 10000
+    mapping (address => uint256) public reserves;
 
-    struct Order {
+    struct Position {
+        // the nonce for permits
+        uint96 nonce;
+        // the address that is approved for spending this token
+        address operator;
+        uint256 pairId;
+
+        // uint256 amountIn;
+        uint256 price;
         uint256 pendingOut;
         uint256 rateRedeemedIndex;
     }
 
-    // user => id => price => Order
-    mapping (address => mapping (uint256 => mapping (uint256 => Order))) public userOrders;
-    
+    uint256 private _nextId = 1;
 
-    mapping (address => uint256) public reserves;
+    mapping (uint256 => Position) private _positions;
+    
     
 
     event AddLiquidity(address indexed sender, address tokenIn, address tokenOut, uint price, uint amountIn);
@@ -82,9 +92,14 @@ contract StakeDex {
         require(gov == msg.sender, "Not gov");
         _; 
     }
+
+    modifier isAuthorizedForToken(uint256 tokenId) {
+        require(_isApprovedOrOwner(msg.sender, tokenId), 'Not approved');
+        _;
+    }
     
 
-    constructor(address feeTo_) public {
+    constructor(address feeTo_) public ERC721('Cowswap Positions', 'COW-POS') {
         gov = msg.sender;
         feeTo = feeTo_;
     }
@@ -96,11 +111,6 @@ contract StakeDex {
         feeForReserve = reserve_;
     }
 
-    // function setAmountInLimit(uint256 min_, uint256 max_) public onlyGov {
-    //     amountInMin = min_;
-    //     amountInMax = max_;
-    // }
-    
     function createPair(address tokenIn, address tokenOut) public {
         getPairId[tokenIn][tokenOut] += 1;
 
@@ -111,6 +121,8 @@ contract StakeDex {
         Pair storage pair = getPair[id];
         pair.id = id;
         pair.decimals = decimals;
+        pair.tokenIn = tokenIn;
+        pair.tokenOut = tokenOut;
 
         emit CreatePair(tokenIn, tokenOut, id);
     }
@@ -120,71 +132,42 @@ contract StakeDex {
         getPair[getPairId[tokenIn][tokenOut]].decimals = int8(decimals_) + int8(IERC20(tokenIn).decimals()) - int8(IERC20(tokenOut).decimals());
     }
 
-    function removeLiquidity(
-        address tokenIn,
-        address tokenOut,
-        uint256 price
-    ) public lock
-    {
-        uint256 id = getPairId[tokenIn][tokenOut];
-        Pair storage pair = getPair[id];
-        Order storage order = userOrders[msg.sender][id][price];
-
-        uint256 amountOut = order.pendingOut;
-
-        if(amountOut > 0) {
-            redeemTraded(msg.sender, tokenIn, tokenOut, price);    
-        }
-        require(amountOut > 0, "No Liquidity");
-
-
-        if(pair.depth[price] >= amountOut) {
-            pair.depth[price] = pair.depth[price].sub(amountOut);
-            order.pendingOut = 0;
-        } else {
-            // require(amountOut.sub(depth[id][price]) <= 100, "Insufficient Depth");
-            amountOut = pair.depth[price];
-            pair.depth[price] = 0;
-            order.pendingOut = 0;
-        }
-
-        uint256 amountReturn = getAmountOut(id, amountOut, price);
-        if(amountReturn > 0) {
-            IERC20(tokenIn).transfer(msg.sender, amountReturn);
-
-            _update(tokenIn);
-        }
-
-        emit RemoveLiquidity(msg.sender, tokenIn, tokenOut, price, amountReturn);
-
-        // if(depth[id][price] == 0) {`
-        //     skimPriceArray(tokenIn, tokenOut);
-        // }
-    }
-
-    // function calcAmountInLimit(address token) public view returns(uint256 min, uint256 max) {
-    //     uint256 dec = uint256(IERC20(token).decimals());
-    //     min = amountInMin.mul(10 ** dec).div(10000);
-    //     max = amountInMax.mul(10 ** dec).div(10000);
-    // }
-
-    function _update(address token) internal {
+    function _updateReserve(address token) internal {
         reserves[token] = IERC20(token).balanceOf(address(this));
     }
 
-    function _transferFrom(address token, address from, uint256 amount) internal returns(uint256) {
+    function _deposit(address token, address from, uint256 amount) internal returns(uint256) {
         uint256 beforeBalance = IERC20(token).balanceOf(address(this));
         IERC20(token).transferFrom(from, address(this), amount);
         uint256 afterBalance = IERC20(token).balanceOf(address(this));
         return afterBalance.sub(beforeBalance);
     }
 
-    function addLiquidity(
+    function _withdraw(address token, address to, uint256 amount) internal {
+        require(IERC20(token).balanceOf(address(this)) >= amount, "Insufficient balance");
+        IERC20(token).transfer(to, amount);
+    }
+
+    function _recordRateIndex(uint256 id, uint256 price) internal returns(uint256 rateIndex) {
+        Pair storage pair = getPair[id];
+        uint256 size = pair.tradedRateStored[price].length;
+        if(pair.tradedRateStored[price][size - 1].traded == 0) {
+            // position.rateRedeemedIndex = size - 1;
+            rateIndex = size - 1;
+        } else {
+            pair.tradedRateStored[price].push(ZERO);
+            // position.rateRedeemedIndex = size;
+            rateIndex = size;
+        }
+    }
+
+    
+    function mint(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
         uint256 amountOut
-    ) public lock
+    ) external lock returns(uint256 tokenId)
     {   
         require(amountIn > 0 && amountOut > 0, "ZERO");
 
@@ -194,7 +177,7 @@ contract StakeDex {
         uint256 id = getPairId[tokenIn][tokenOut];
         Pair storage pair = getPair[id];
 
-        amountIn = _transferFrom(tokenIn, msg.sender, amountIn);
+        amountIn = _deposit(tokenIn, msg.sender, amountIn);
 
         uint256 price;
 
@@ -208,18 +191,7 @@ contract StakeDex {
 
         require(price > 0, "Zero Price");
 
-        // if(userOrders[msg.sender][id][price] > 0) {
-        //     redeemTraded(msg.sender, tokenIn, tokenOut, price);
-        // }
-
         pair.depth[price] = pair.depth[price].add(amountOut); 
-
-        // depth[id][price] = depth[id][price].add(amountOut);
-        // userOrders[msg.sender][id][price] = userOrders[msg.sender][id][price].add(amountOut);
-
-        Order storage order = userOrders[msg.sender][id][price];
-        order.pendingOut = order.pendingOut.add(amountOut);
-
 
         addToPriceArray(tokenIn, tokenOut, price);
 
@@ -227,33 +199,98 @@ contract StakeDex {
             pair.tradedRateStored[price].push(HEAD);
         }
 
-        uint256 size = pair.tradedRateStored[price].length;
-        if(pair.tradedRateStored[price][size - 1].traded == 0) {
-            // userRateRedeemed[msg.sender][id][price] = size - 1;
-            order.rateRedeemedIndex = size - 1;
-        } else {
-            pair.tradedRateStored[price].push(ZERO);
-            // userRateRedeemed[msg.sender][id][price] = size;
-            order.rateRedeemedIndex = size;
-        }
+        _updateReserve(tokenIn);
 
+        _mint(msg.sender, (tokenId = _nextId++));
 
-
-        // if (tradedRateStored[id][price].length == 0) {
-        //     tradedRateStored[id][price].push(HEAD);
-        // }
-        // uint256 size = tradedRateStored[id][price].length;
-        // if(tradedRateStored[id][price][size - 1].traded == 0) {
-        //     userRateRedeemed[msg.sender][id][price] = size - 1;
-        // } else {
-        //     tradedRateStored[id][price].push(ZERO);
-        //     userRateRedeemed[msg.sender][id][price] = size;
-        // }
-
-        _update(tokenIn);
+        Position storage position = _positions[tokenId];
+        position.pairId = id;
+        position.price = price;
+        position.pendingOut = amountOut;
+        position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
 
         emit AddLiquidity(msg.sender, tokenIn, tokenOut, price, amountIn);
     }
+
+    function increasePosition(uint256 tokenId, uint256 amountIn) external lock {
+        _redeemTraded(tokenId);
+        Position storage position = _positions[tokenId];
+        Pair storage pair = getPair[position.pairId];
+        amountIn = _deposit(pair.tokenIn, msg.sender, amountIn);
+        position.pendingOut += getAmountOut(position.pairId, amountIn, position.price);
+        position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
+        _updateReserve(pair.tokenIn);
+    }
+
+
+    function decreasePosition(uint256 tokenId, uint256 amountIn) external lock isAuthorizedForToken(tokenId) {
+        address owner = ownerOf(tokenId);
+        _redeemTraded(tokenId);
+        Position storage position = _positions[tokenId];
+        Pair storage pair = getPair[position.pairId];
+        // amountIn = _deposit(pair.tokenIn, msg.sender, amountIn);
+        uint256 amountOut = getAmountOut(position.pairId, amountIn, position.price);
+        require(position.pendingOut >= amountOut, "Insufficient");
+        position.pendingOut -= amountOut;
+        position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
+        _withdraw(pair.tokenIn, owner, amountIn);
+        _updateReserve(pair.tokenIn);
+    }
+
+    function burn(uint256 tokenId) external lock isAuthorizedForToken(tokenId) {
+        address owner = ownerOf(tokenId);
+        Position storage position = _positions[tokenId];
+        Pair storage pair = getPair[position.pairId];
+        _redeemTraded(tokenId);
+        uint amountIn = getAmountIn(position.pairId, position.pendingOut, position.price);
+        if(amountIn > 0) {
+            _withdraw(pair.tokenIn, owner, amountIn);
+        }
+        // redeem
+        _burn(tokenId);
+        delete _positions[tokenId];
+    }
+
+    function _redeemTraded(uint256 tokenId) internal {
+        Position storage position = _positions[tokenId];
+        Pair storage pair = getPair[position.pairId];
+
+        address owner = ownerOf(tokenId);
+
+        require(position.pendingOut > 0, "No Liquidity");
+
+        Rate[] storage rates = pair.tradedRateStored[position.price];
+
+        uint256 accumlatedRate = 0;
+        uint256 accumlatedRateFee = 0;
+        uint256 startIndex = position.rateRedeemedIndex;
+
+
+        for(uint256 i = startIndex; i < rates.length; i++) {
+            accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
+            accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
+            if(rates[i].traded == AMP) {
+                break;
+            }
+        }
+        uint256 filled = position.pendingOut.mul(accumlatedRate).div(AMP);
+        uint256 fee = position.pendingOut.mul(accumlatedRateFee).div(AMP);
+        if(filled > 0) {
+            _withdraw(pair.tokenOut, owner, filled.add(fee));
+            position.pendingOut = position.pendingOut.sub(filled);
+
+            _updateReserve(pair.tokenOut);
+
+            emit Redeem(owner, pair.tokenIn, pair.tokenOut, position.price, filled);
+        }
+    }
+
+    function redeem(uint256 tokenId) external lock isAuthorizedForToken(tokenId) {
+        Position storage position = _positions[tokenId];
+        _redeemTraded(tokenId);
+        position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
+    }
+
 
     function addToPriceArray(address tokenIn, address tokenOut, uint256 price) internal {
         uint id = getPairId[tokenIn][tokenOut];
@@ -290,98 +327,44 @@ contract StakeDex {
         }
     }
 
-    function skimPriceArray(
-        address tokenIn, 
-        address tokenOut
-    ) internal 
-    {
-        uint id = getPairId[tokenIn][tokenOut];
-        Pair storage pair = getPair[id];
-        uint256[] storage priceArray = pair.prices;
+    // function skimPriceArray(
+    //     address tokenIn, 
+    //     address tokenOut
+    // ) internal 
+    // {
+    //     uint id = getPairId[tokenIn][tokenOut];
+    //     Pair storage pair = getPair[id];
+    //     uint256[] storage priceArray = pair.prices;
 
-        if(priceArray.length == 0) {
-            return;
-        }
+    //     if(priceArray.length == 0) {
+    //         return;
+    //     }
 
-        if(priceArray.length == 1) {
-            if(pair.depth[priceArray[0]] == 0) {
-                priceArray.pop();
-            }
-            return;
-        }
+    //     if(priceArray.length == 1) {
+    //         if(pair.depth[priceArray[0]] == 0) {
+    //             priceArray.pop();
+    //         }
+    //         return;
+    //     }
 
-        uint256 i = 0;
-        uint256 len = priceArray.length;
+    //     uint256 i = 0;
+    //     uint256 len = priceArray.length;
 
-        while(i < len) {
-            uint256 price = priceArray[i];
-            if(pair.depth[price] == 0) {
-                for(uint256 j = i; j < len - 1; j++) {
-                    priceArray[j] = priceArray[j + 1];
-                }
-                priceArray.pop();
-                len = len - 1;
-            }
-            i++;
-        }
-    }
+    //     while(i < len) {
+    //         uint256 price = priceArray[i];
+    //         if(pair.depth[price] == 0) {
+    //             for(uint256 j = i; j < len - 1; j++) {
+    //                 priceArray[j] = priceArray[j + 1];
+    //             }
+    //             priceArray.pop();
+    //             len = len - 1;
+    //         }
+    //         i++;
+    //     }
+    // }
+
     function calcRate(uint256 currentRate, uint256 storedRate) public view returns(uint256) {
         return uint(AMP).sub(storedRate).mul(currentRate).div(AMP);
-    }
-
-
-    function redeemTraded(
-        address account, 
-        address tokenIn, 
-        address tokenOut, 
-        uint256 price
-    ) internal
-    {
-        uint id = getPairId[tokenIn][tokenOut];
-        Pair storage pair = getPair[id];
-        Order storage order = userOrders[account][id][price];
-
-        require(order.pendingOut > 0, "No Liquidity");
-
-        Rate[] storage rates = pair.tradedRateStored[price];
-
-        uint256 accumlatedRate = 0;
-        uint256 accumlatedRateFee = 0;
-        uint256 startIndex = order.rateRedeemedIndex;
-
-
-        for(uint256 i = startIndex; i < rates.length; i++) {
-            accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
-            accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
-            if(rates[i].traded == AMP) {
-                break;
-            }
-        }
-        uint256 filled = order.pendingOut.mul(accumlatedRate).div(AMP);
-        uint256 fee = order.pendingOut.mul(accumlatedRateFee).div(AMP);
-        if(filled > 0) {
-            IERC20(tokenOut).transfer(account, filled.add(fee));
-            order.pendingOut = order.pendingOut.sub(filled);
-
-            _update(tokenOut);
-
-            emit Redeem(account, tokenIn, tokenOut, price, filled);
-        }
-    }
-
-    function redeem(address tokenIn, address tokenOut, uint256 price) public lock {
-        uint id = getPairId[tokenIn][tokenOut];
-        redeemTraded(msg.sender, tokenIn, tokenOut, price);
-
-        Pair storage pair = getPair[id];
-        uint256 size = pair.tradedRateStored[price].length;
-
-        if(pair.tradedRateStored[price][size - 1].traded == 0) {
-            userOrders[msg.sender][id][price].rateRedeemedIndex = size - 1;
-        } else {
-            pair.tradedRateStored[price].push(ZERO);
-            userOrders[msg.sender][id][price].rateRedeemedIndex = size;
-        }
     }
 
     function swap(
@@ -389,7 +372,7 @@ contract StakeDex {
         address tokenOut, 
         uint amountOutMin,
         address to
-    ) public returns(uint256 amountOut)
+    ) external returns(uint256 amountOut)
     {   
         uint id = getPairId[tokenOut][tokenIn];
 
@@ -430,7 +413,7 @@ contract StakeDex {
         }
 
         reserves[tokenOut] = reserves[tokenOut].sub(amountOut);
-        _update(tokenIn);
+        _updateReserve(tokenIn);
 
         emit Swap(msg.sender, tokenIn, tokenOut, total.sub(amountIn), amountOut);
     }
@@ -556,62 +539,64 @@ contract StakeDex {
         amountReturn = amountIn;
     }
 
-    function getLiquidity(
-        address account, 
-        address tokenIn, 
-        address tokenOut, 
-        uint256 price
-    ) public view returns(uint256 feeRewarded, uint256 filled, uint256 pending) {
-        uint256 id = getPairId[tokenIn][tokenOut];
+    function positions(uint256 tokenId) 
+        external 
+        view 
+        returns(
+            uint256 nonce,
+            address operator,
+            uint256 pairId,
+            uint256 pendingIn,
+            uint256 price,
+            uint256 pendingOut,
+            uint256 rateRedeemedIndex,
+            address tokenIn,
+            address tokenOut,
+            uint256 filled,
+            uint256 feeRewarded
+        ) 
+    {
+        Position memory position = _positions[tokenId];
+        Pair storage pair = getPair[position.pairId];
 
-        // Pair storage pair = getPair[id];
-        Order memory order = userOrders[account][id][price];
+        if(position.pendingOut == 0) {
+            filled = 0;
+            feeRewarded = 0;
+            pendingOut = 0;
+        } else {
+            Rate[] storage rates = pair.tradedRateStored[position.price];
 
-        if(order.pendingOut == 0) {
-            return (0, 0, 0);
-        }
-
-        Rate[] memory rates = getPair[id].tradedRateStored[price];
-
-        uint256 accumlatedRate = 0;
-        uint256 accumlatedRateFee = 0;
-        uint256 startIndex = order.rateRedeemedIndex;
-
-        for(uint256 i = startIndex; i < rates.length; i++) {
-            accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
-            accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
-            if(rates[i].traded == AMP) {
-                break;
+            uint256 accumlatedRate = 0;
+            uint256 accumlatedRateFee = 0;
+            uint256 startIndex = position.rateRedeemedIndex;
+            for(uint256 i = startIndex; i < rates.length; i++) {
+                accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
+                accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
+                if(rates[i].traded == AMP) {
+                    break;
+                }
             }
+            filled = position.pendingOut.mul(accumlatedRate).div(AMP);
+            feeRewarded = position.pendingOut.mul(accumlatedRateFee).div(AMP);
+            pendingOut = position.pendingOut.sub(filled);
         }
-        filled = order.pendingOut.mul(accumlatedRate).div(AMP);
-        feeRewarded = order.pendingOut.mul(accumlatedRateFee).div(AMP);
-        pending = order.pendingOut.sub(filled);
+
+        pendingIn = getAmountIn(position.pairId, position.pendingOut, position.price);
+
+        return (
+            position.nonce,
+            position.operator,
+            position.pairId,
+            pendingIn,
+            position.price,
+            pendingOut,
+            position.rateRedeemedIndex,
+            pair.tokenIn,
+            pair.tokenOut,
+            filled,
+            feeRewarded
+        );
     }
 
-    function getAllLiquidities(
-        address account, 
-        address tokenIn, 
-        address tokenOut
-    ) public view returns(uint256[4][] memory, uint256 size) {
-        uint256 id = getPairId[tokenIn][tokenOut];
-        Pair memory pair = getPair[id];
 
-        uint256[4][] memory liqs = new uint256[4][](pair.prices.length);
-
-        uint256 j = 0;
-        for(uint256 i; i < pair.prices.length; i++) {
-            (uint256 feeRewarded, uint256 filled, uint256 pending) = getLiquidity(account, tokenIn, tokenOut, pair.prices[i]);
-            if(feeRewarded == 0 && filled == 0 && pending == 0) {
-                continue;
-            }
-            liqs[j][0] = pair.prices[i];
-            liqs[j][1] = feeRewarded;
-            liqs[j][2] = filled;
-            liqs[j][3] = pending;
-            j++;
-        }
-
-        return (liqs, j + 1);
-    }
 }
