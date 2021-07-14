@@ -908,7 +908,7 @@ contract CowswapRouter is IPancakeRouter02 {
     ) external payable ensure(deadline) checkCOWB returns (uint amountToken, uint amountETH, uint liquidity) {
         
         uint amountIn = msg.value;
-        IWETH(WETH).deposit{value: amountIn}();
+        IWETH(WETH).deposit{value: amountIn / 2}();
         assert(IWETH(WETH).transfer(PancakeLibrary.pairFor(factory, token, WETH), amountIn / 2));
         
         address[] memory path = new address[](2);
@@ -919,7 +919,7 @@ contract CowswapRouter is IPancakeRouter02 {
         _swapSupportingFeeOnTransferTokens(path, address(this));
         amountToken = IERC20(token).balanceOf(address(this)).sub(balanceBefore);
 
-        (amountToken, amountETH) = _addLiquidity(
+        (, amountETH) = _addLiquidity(
             token,
             WETH,
             amountToken,
@@ -930,7 +930,10 @@ contract CowswapRouter is IPancakeRouter02 {
 
         address pair = PancakeLibrary.pairFor(factory, token, WETH);
         TransferHelper.safeTransfer(token, pair, amountToken);
-
+        if(amountETH > amountIn / 2) {
+            amountETH = amountIn.sub(amountIn / 2);
+        }
+        IWETH(WETH).deposit{value: amountETH}();
         assert(IWETH(WETH).transfer(pair, amountETH));
         liquidity = IPancakePair(pair).mint(to);
 
@@ -938,11 +941,7 @@ contract CowswapRouter is IPancakeRouter02 {
         uint spentETH = amountETH.add(amountIn / 2);
         // refund dust eth, if any
         if (msg.value > spentETH) {
-            uint refund = msg.value - spentETH;
-            if(address(this).balance < refund) {
-                refund = address(this).balance;
-            }
-            TransferHelper.safeTransferETH(msg.sender, refund); 
+            TransferHelper.safeTransferETH(msg.sender, msg.value - spentETH); 
         }
     }
 

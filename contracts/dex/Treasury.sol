@@ -34,8 +34,8 @@ contract Treasury is Ownable {
     cowb = IERC20(cowb_);
   }
 
-  function sendRewards(address to, uint256 amount) external onlyOperator {
-    uint256 val = safeCowbTransfer(to, amount);
+  function sendRewards(address to, uint256 amount) external onlyOperator returns(uint256 val) {
+    val = safeCowbTransfer(to, amount);
     emit Reward(to, val);
   }
 
