@@ -74,8 +74,9 @@ contract StakeDex is ERC721 {
     
     
 
-    event AddLiquidity(address indexed sender, address tokenIn, address tokenOut, uint price, uint amountIn);
-    event RemoveLiquidity(address indexed sender, address tokenIn, address tokenOut, uint price, uint amountReturn);
+    event IncreasePosition(address indexed sender, address tokenIn, address tokenOut, uint price, uint amountIn);
+    event DecreasePosition(address indexed sender, address tokenIn, address tokenOut, uint price, uint amountIn);
+
     event Swap(address indexed sender, address tokenIn, address tokenOut, uint amountIn, uint amountOut);
     event Redeem(address indexed sender, address tokenIn, address tokenOut, uint price, uint filled);
     event CreatePair(address indexed token0, address indexed token1, uint256 id);
@@ -209,7 +210,7 @@ contract StakeDex is ERC721 {
         position.pendingOut = amountOut;
         position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
 
-        emit AddLiquidity(msg.sender, tokenIn, tokenOut, price, amountIn);
+        emit IncreasePosition(msg.sender, tokenIn, tokenOut, price, amountIn);
     }
 
     function increasePosition(uint256 tokenId, uint256 amountIn) external lock {
@@ -217,24 +218,31 @@ contract StakeDex is ERC721 {
         Position storage position = _positions[tokenId];
         Pair storage pair = getPair[position.pairId];
         amountIn = _deposit(pair.tokenIn, msg.sender, amountIn);
-        position.pendingOut += getAmountOut(position.pairId, amountIn, position.price);
+        uint256 amountOut = getAmountIn(position.pairId, amountIn, position.price);
+        pair.depth[position.price] = pair.depth[position.price].add(amountOut);
+
+        position.pendingOut = position.pendingOut.add(amountOut);
         position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
         _updateReserve(pair.tokenIn);
+
+        emit IncreasePosition(msg.sender, pair.tokenIn, pair.tokenOut, position.price, amountIn);
     }
 
 
     function decreasePosition(uint256 tokenId, uint256 amountIn) external lock isAuthorizedForToken(tokenId) {
-        address owner = ownerOf(tokenId);
         _redeemTraded(tokenId);
         Position storage position = _positions[tokenId];
         Pair storage pair = getPair[position.pairId];
-        // amountIn = _deposit(pair.tokenIn, msg.sender, amountIn);
-        uint256 amountOut = getAmountOut(position.pairId, amountIn, position.price);
-        require(position.pendingOut >= amountOut, "Insufficient");
-        position.pendingOut -= amountOut;
+        uint256 amountOut = getAmountIn(position.pairId, amountIn, position.price);
+        require(position.pendingOut >= amountOut, "Insufficient position");
+        pair.depth[position.price] = pair.depth[position.price].sub(amountOut);
+
+        position.pendingOut = position.pendingOut.sub(amountOut);
         position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
-        _withdraw(pair.tokenIn, owner, amountIn);
+        _withdraw(pair.tokenIn, ownerOf(tokenId), amountIn);
         _updateReserve(pair.tokenIn);
+
+        emit DecreasePosition(msg.sender, pair.tokenIn, pair.tokenOut, position.price, amountIn);
     }
 
     function burn(uint256 tokenId) external lock isAuthorizedForToken(tokenId) {
@@ -242,13 +250,15 @@ contract StakeDex is ERC721 {
         Position storage position = _positions[tokenId];
         Pair storage pair = getPair[position.pairId];
         _redeemTraded(tokenId);
-        uint amountIn = getAmountIn(position.pairId, position.pendingOut, position.price);
+        uint amountIn = getAmountOut(position.pairId, position.pendingOut, position.price);
         if(amountIn > 0) {
             _withdraw(pair.tokenIn, owner, amountIn);
         }
         // redeem
         _burn(tokenId);
         delete _positions[tokenId];
+
+        emit DecreasePosition(msg.sender, pair.tokenIn, pair.tokenOut, position.price, amountIn);
     }
 
     function _redeemTraded(uint256 tokenId) internal {
@@ -402,7 +412,7 @@ contract StakeDex is ERC721 {
         require(amountOut >= amountOutMin && amountOut > 0, "INSUFFICIENT_OUT_AMOUNT");
 
         if(amountIn > 0) {
-            IERC20(tokenIn).transfer(to, amountIn); // refund
+            IERC20(tokenIn).transfer(msg.sender, amountIn); // refund
         }
 
         // IERC20(tokenIn).transferFrom(msg.sender, address(this), total.sub(amountIn));
@@ -461,8 +471,6 @@ contract StakeDex is ERC721 {
         return (amountIn, amountOut, reserveFee);
     }
 
-    
-
     function getAmountOut(uint256 id, uint256 amountIn, uint256 price) public view returns(uint256) {
         int8 exp = getPair[id].decimals;
         if(exp > 0) {
@@ -497,7 +505,7 @@ contract StakeDex is ERC721 {
             uint256 amountWithFee = getAmountIn(id, amountOut, p).mul(10000 + feeForTake).div(10000);
 
             if(amountWithFee > getPair[id].depth[p]) {
-                amountIn += getPair[id].depth[p].mul(10000 + feeForTake).div(10000);
+                amountIn += getPair[id].depth[p].add(getPair[id].depth[p].mul(feeForTake).div(10000));
                 amountOut = amountOut.sub(getAmountOut(id, getPair[id].depth[p], p));
             } else {
                 amountIn += getAmountIn(id, amountOut, p).mul(10000 + feeForTake).div(10000);
@@ -524,12 +532,10 @@ contract StakeDex is ERC721 {
             uint256 amountWithFee = getPair[id].depth[p].add(getPair[id].depth[p].mul(feeForTake).div(10000));
 
             if(amountIn >= amountWithFee) {
-                // amountOut += depth[id][p].mul(1e18).div(p);
                 amountOut += getAmountOut(id, getPair[id].depth[p], p);
                 amountIn = amountIn.sub(amountWithFee);
             } else {
                 uint256 fee = amountIn.mul(feeForTake).div(10000);
-                // amountOut += amountIn.sub(fee).mul(1e18).div(p);
                 amountOut += getAmountOut(id, amountIn.sub(fee), p);
                 amountIn = 0;
                 break;
@@ -556,6 +562,7 @@ contract StakeDex is ERC721 {
             uint256 feeRewarded
         ) 
     {
+        require(_exists(tokenId), "No position");
         Position memory position = _positions[tokenId];
         Pair storage pair = getPair[position.pairId];
 
@@ -581,7 +588,7 @@ contract StakeDex is ERC721 {
             pendingOut = position.pendingOut.sub(filled);
         }
 
-        pendingIn = getAmountIn(position.pairId, position.pendingOut, position.price);
+        pendingIn = getAmountOut(position.pairId, pendingOut, position.price);
 
         return (
             position.nonce,
@@ -599,4 +606,22 @@ contract StakeDex is ERC721 {
     }
 
 
+    function pairs(address tokenIn, address tokenOut) 
+    public 
+    view 
+    returns(
+        uint256 id,
+        int8 decimals,
+        uint256[] memory prices,
+        uint256[] memory depths
+    ) {
+        id = getPairId[tokenIn][tokenOut];
+        Pair storage pair = getPair[id];
+        decimals = pair.decimals;
+        prices = pair.prices;
+        depths = new uint256[](prices.length);
+        for(uint256 i = 0; i < prices.length; i++) {
+            depths[i] = pair.depth[prices[i]];
+        }
+    }
 }

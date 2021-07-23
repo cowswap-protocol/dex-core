@@ -3,7 +3,7 @@ const { expect } = require('chai');
 const { toBN } = require('web3-utils');
 const { BN, expectEvent, expectRevert, time, constants, balance } = require('@openzeppelin/test-helpers');
 
-const [ admin, deployer, user, holder, investor1, investor2, investor3, investor4 ] = accounts;
+const [ admin, deployer, user, holder, investor1, investor2, investor3, investor4, investor11, investor12 ] = accounts;
 
 
 const StakeDex = contract.fromArtifact('StakeDex');
@@ -20,320 +20,299 @@ describe("StakeDex", function() {
 
 
   beforeEach(async () => {
-    this.TokenA = await Mock.new("Token A", "A", 18);
-    this.TokenB = await Mock.new("Token B", "B", 18);
+    this.TokenIn = await Mock.new("TokenIn", "IN", 18);
+    this.TokenOut = await Mock.new("TokenOut", "OUT", 18);
+
+    await this.TokenIn.mint(investor1, toBN('1000').mul(BASE));
+    await this.TokenIn.mint(investor2, toBN('1000').mul(BASE));
+    await this.TokenIn.mint(investor11, toBN('1000').mul(BASE));
+    await this.TokenIn.mint(investor12, toBN('1000').mul(BASE));
+
+    await this.TokenOut.mint(investor3, toBN('1000').mul(BASE));
+    await this.TokenOut.mint(investor4, toBN('1000').mul(BASE));
 
     this.Dex = await StakeDex.new(FEE);
-    await this.Dex.createPair(this.TokenB.address, this.TokenA.address)
+    await this.Dex.createPair(this.TokenIn.address, this.TokenOut.address)
   });
 
   it("StakeDex:createPair", async() => {
-    let id1 = await this.Dex.getPairId(this.TokenA.address, this.TokenB.address);
-    let id2 = await this.Dex.getPairId(this.TokenB.address, this.TokenA.address);
+    let id = await this.Dex.getPairId(this.TokenIn.address, this.TokenOut.address);
+    expect(id.toNumber()).to.eq(1)
+  })
+
+  it("StakeDex:mint", async()=> {
+      await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
+      let amountIn = toBN('3').mul(BASE)
+      let amountOut = toBN('1').mul(BASE)
+      await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn, amountOut, { from: investor1 });
+      let tokenId = await this.Dex.tokenOfOwnerByIndex(investor1, 0)
+      expect(tokenId.toNumber()).to.eq(1)
+
+      let position = await this.Dex.positions(tokenId)
+      expect(position.price.toString()).to.eq('3333333333')
+      expect(position.pendingOut.toString()).to.eq('999999999900000000')
+
+      let id = await this.Dex.getPairId(this.TokenIn.address, this.TokenOut.address);
+      let pair = await this.Dex.pairs(id)
+
+      expect(pair.amounts.map(a => a.toString())).to.have.members(
+        ['999999999900000000']
+      )
+  })
+
+  it("StakeDex:burn w/o traded", async() => {
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
+    let amountIn = toBN('3').mul(BASE)
+    let amountOut = toBN('1').mul(BASE)
+    let balanceBefore = await this.TokenIn.balanceOf(investor1)
+
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn, amountOut, { from: investor1});
+
+    let tokenId = await this.Dex.tokenOfOwnerByIndex(investor1, 0)
+    let balance0 = await this.TokenIn.balanceOf(investor1)
+    await this.Dex.burn(tokenId, { from: investor1 })
+
+    let balance1 = await this.TokenIn.balanceOf(investor1)
+    expect(balance1.toString()).to.eq(balanceBefore.toString())
+  })
+
+  it("StakeDex:swap, simple", async() => {
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
+    let amountIn = toBN('3').mul(BASE)
+    let amountOut = toBN('1').mul(BASE)
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn, amountOut, { from: investor1});
+
+    let price = amountOut.mul(toBN(10**10)).div(amountIn)
+
+    let id = await this.Dex.getPairId(this.TokenIn.address, this.TokenOut.address);
+    let pair = await this.Dex.pairs(id)
+    let buyIn = pair.amounts[0].add(pair.amounts[0].mul(toBN(20)).div(toBN(10000)))
+
+    await this.TokenOut.transfer(this.Dex.address, buyIn, { from: investor3 })
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3, { from: investor3 })
+
+    let takeFee = pair.amounts[0].mul(toBN(20)).div(toBN(10000))
+    let realIn = buyIn.sub(takeFee)
+    let realOut = realIn.mul(toBN(10**10)).div(price)
+    expect(realOut.toString()).to.eq('3000000000000000000')
+  })
+
+  it("StakeDex:swap, take multi orders", async() => {
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1 });
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2 });
+    // 3 -> 1, price = 3333333333
+    let amountIn1 = toBN('3').mul(BASE)
+    let amountOut1 = toBN('1').mul(BASE)
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn1, amountOut1, { from: investor1 });
+
+    // 3 -> 1.1, price = 3666666666
+    let amountIn2 = toBN('3').mul(BASE)
+    let amountOut2 = toBN('11').mul(BASE).div(toBN('10'))
+
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn2, amountOut2, { from: investor2 });
+
+    let takeOut = toBN('6').mul(BASE)
+    let buyIn = await this.Dex.calcInAmount(this.TokenOut.address, this.TokenIn.address, takeOut)
+    expect(buyIn.amountIn.toString()).to.eq('2104199999699400000')
+    expect(buyIn.amountReturn.toString()).to.eq('0')
+
+    this.TokenOut.transfer(this.Dex.address, buyIn.amountIn, { from: investor3 })
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+
+    let tradedIn = await this.TokenIn.balanceOf(investor3)
+    expect(tradedIn.toString()).to.eq(takeOut.toString())
+  })
+
+
+  it("StakeDex:burn, check taker returns", async() => {
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1 });
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2 });
+    // 3 -> 1, price = 3333333333
+    let amountIn1 = toBN('3').mul(BASE)
+    let amountOut1 = toBN('1').mul(BASE)
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn1, amountOut1, { from: investor1 });
+
+    // 3 -> 1.1, price = 3666666666
+    let amountIn2 = toBN('3').mul(BASE)
+    let amountOut2 = toBN('11').mul(BASE).div(toBN('10'))
+
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn2, amountOut2, { from: investor2 });
+
+    let takeOut = toBN('6').mul(BASE)
+    let buyIn = await this.Dex.calcInAmount(this.TokenOut.address, this.TokenIn.address, takeOut)
+    expect(buyIn.amountIn.toString()).to.eq('2104199999699400000')
+    expect(buyIn.amountReturn.toString()).to.eq('0')
+
+    this.TokenOut.transfer(this.Dex.address, buyIn.amountIn, { from: investor3 })
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+
+    let tradedIn = await this.TokenIn.balanceOf(investor3)
+    expect(tradedIn.toString()).to.eq(takeOut.toString())
+
+
+    let tokenId1 = await this.Dex.tokenOfOwnerByIndex(investor1, 0)
+    await this.Dex.burn(tokenId1, { from: investor1 })
+    let out1 = await this.TokenOut.balanceOf(investor1)
+
+    expect(out1.toString()).to.eq("1000999999899900000")
+
+
+    let tokenId2 = await this.Dex.tokenOfOwnerByIndex(investor2, 0)
+    await this.Dex.burn(tokenId2, { from: investor2 })
+    let out2 = await this.TokenOut.balanceOf(investor2)
+
+    expect(out2.toString()).to.eq("1101099999799800000")
+  })
+
+  it("StakeDex:burn, check maker returns", async() => {
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1 });
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2 });
+    // 3 -> 1, price = 3333333333
+    let amountIn1 = toBN('3').mul(BASE)
+    let amountOut1 = toBN('1').mul(BASE)
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn1, amountOut1, { from: investor1 });
+
+    // 3 -> 1.1, price = 3666666666
+    let amountIn2 = toBN('3').mul(BASE)
+    let amountOut2 = toBN('11').mul(BASE).div(toBN('10'))
+
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn2, amountOut2, { from: investor2 });
+
+    let takeOut = toBN('6').mul(BASE)
+    let buyIn = await this.Dex.calcInAmount(this.TokenOut.address, this.TokenIn.address, takeOut)
+    expect(buyIn.amountIn.toString()).to.eq('2104199999699400000')
+    expect(buyIn.amountReturn.toString()).to.eq('0')
+
+    await this.TokenOut.transfer(this.Dex.address, buyIn.amountIn, { from: investor3 })
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+
+    let tradedIn = await this.TokenIn.balanceOf(investor3)
+    expect(tradedIn.toString()).to.eq(takeOut.toString())
+
+
+    let tokenId1 = await this.Dex.tokenOfOwnerByIndex(investor1, 0)
+    await this.Dex.burn(tokenId1, { from: investor1 })
+    let out1 = await this.TokenOut.balanceOf(investor1)
+    expect(out1.toString()).to.eq("1000999999899900000")
+
+
+    let tokenId2 = await this.Dex.tokenOfOwnerByIndex(investor2, 0)
+    await this.Dex.burn(tokenId2, { from: investor2 })
+    let out2 = await this.TokenOut.balanceOf(investor2)
+    expect(out2.toString()).to.eq("1101099999799800000")
+  })
+
+  it("StakeDex:burn, check multi makers", async() => {
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1 })
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2 })
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor11 })
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor12 })
+
+    // 3 -> 1, price = 3333333333
+    let amountIn1 = toBN('3').mul(BASE)
+    let amountOut1 = toBN('1').mul(BASE)
+    let tokenId1 = 1
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn1, amountOut1, { from: investor1 });
+
+    let position1Before = await this.Dex.positions(tokenId1)
+    expect(position1Before.pendingIn.toString()).to.eq('3000000000000000000')
+    expect(position1Before.pendingOut.toString()).to.eq('999999999900000000')
+    expect(position1Before.rateRedeemedIndex.toNumber()).to.eq(1)
+
+    // 3 -> 1.1, price = 3666666666
+    let amountIn2 = toBN('3').mul(BASE)
+    let amountOut2 = toBN('11').mul(BASE).div(toBN('10'))
+    let tokenId2 = 2
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn2, amountOut2, { from: investor2 });
+
+    // 6 -> 2, price = 3333333333
+    let amountIn3 = toBN('6').mul(BASE)
+    let amountOut3 = toBN('2').mul(BASE)
+    let tokenId3 = 3
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn3, amountOut3, { from: investor11 });
+
+    // 0.3 -> 0.1, price = 3333333333
+    let amountIn4 = toBN('3').mul(BASE).div(toBN('10'))
+    let amountOut4 = toBN('1').mul(BASE).div(toBN('10'))
+    let tokenId4 = 4
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn4, amountOut4, { from: investor12 });
+
+
+    let takeOut = toBN('123').mul(BASE).div(toBN('10')) // 9.3
+    let buyIn = await this.Dex.calcInAmount(this.TokenOut.address, this.TokenIn.address, takeOut)
+
+    await this.TokenOut.transfer(this.Dex.address, buyIn.amountIn, { from: investor3 })
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+
+
+    let position1BeforeBurn = await this.Dex.positions(tokenId1)
+    expect(position1BeforeBurn.pendingIn.toString()).to.eq('0')
+    expect(position1BeforeBurn.pendingOut.toString()).to.eq('0')
+    expect(position1BeforeBurn.rateRedeemedIndex.toNumber()).to.eq(1)
+    expect(position1BeforeBurn.filled.toString()).to.eq('999999999900000000')
+    expect(position1BeforeBurn.feeRewarded.toString()).to.eq('999999999900000')
+
+
+    await this.Dex.burn(tokenId1, { from: investor1 })
+    let out1 = await this.TokenOut.balanceOf(investor1)
+    expect(out1.toString()).to.eq("1000999999899900000")
+
+    await expectRevert(
+      this.Dex.positions(tokenId1),
+      "No position"
+    );
+
+    await this.Dex.burn(tokenId2, { from: investor2 })
+    let out2 = await this.TokenOut.balanceOf(investor2)
+    expect(out2.toString()).to.eq("1101099999799800000")
+
+    await this.Dex.burn(tokenId3, { from: investor11 })
+    let out3 = await this.TokenOut.balanceOf(investor11)
+    expect(out3.toString()).to.eq("2001999999799800000")
+
+    await this.Dex.burn(tokenId4, { from: investor12 })
+    let out4 = await this.TokenOut.balanceOf(investor12)
+    expect(out4.toString()).to.eq("100099999989990000")
+  })
+
+  it("StakeDex:swap, multi swaps", async() => {
+    await this.TokenIn.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1 })
+
+    // 3 -> 1, price = 3333333333
+    let amountIn1 = toBN('30').mul(BASE)
+    let amountOut1 = toBN('10').mul(BASE)
+    let tokenId1 = 1
+    await this.Dex.mint(this.TokenIn.address, this.TokenOut.address, amountIn1, amountOut1, { from: investor1 });
+
+    let pos0 = await this.Dex.positions(tokenId1)
+    expect(pos0.pendingIn.toString()).to.eq('30000000000000000000')
+    expect(pos0.pendingOut.toString()).to.eq('9999999999000000000')
+
+    let amount1 = toBN('5').mul(BASE)
+    await this.TokenOut.transfer(this.Dex.address, amount1, { from: investor3 })
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+
+    let pos1 = await this.Dex.positions(tokenId1)
     
-    let a = toBN(this.TokenA.address)
-    let b = toBN(this.TokenB.address)
+    expect(pos1.pendingIn.toString()).to.eq('15029999998503000002') // 15029999998502999999
+    expect(pos1.pendingOut.toString()).to.eq('5009999999000000001') // 5009999999000000000
 
-    if(a.lt(b)) {
-      expect(id1.toNumber()).to.eq(1)
-      expect(id2.toNumber()).to.eq(2)
-    } else {
-      expect(id1.toNumber()).to.eq(2)
-      expect(id2.toNumber()).to.eq(1)
-    }
-   
-  })
+    let increasedAmount = toBN('3').mul(BASE)
+    await this.Dex.increasePosition(tokenId1, increasedAmount, {  from: investor1 })
 
-  it("StakeDex:addLiquidity", async() => {
+    let pos2 = await this.Dex.positions(tokenId1)
+    expect(pos2.pendingIn.toString()).to.eq('18029999998503000002') // 18029999998503000000
+    expect(pos2.pendingOut.toString()).to.eq('6009999998900000001') // 6009999998900000000
 
-    await this.TokenA.mint(investor1, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor2, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor3, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor4, toBN('3').mul(BASE));
 
+    let amount2 = toBN('2').mul(BASE)
+    await this.TokenOut.transfer(this.Dex.address, amount2, { from: investor3 })
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
 
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor3});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor4});
-
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor1 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('3').mul(BASE), { from: investor2 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('2').mul(BASE), { from: investor3 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('4').mul(BASE), { from: investor4 });
-
-    
-    let prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address);
-    expect(prices.map(p => p.toString())).to.have.members([
-      '33333333',
-      '66666666',
-      '100000000',
-      '133333333'
-    ])
-  })
-
-  it("StakeDex:addLiquidity case2", async() => {
-
-    await this.TokenA.mint(investor1, toBN('10').mul(BASE));
-    await this.TokenA.mint(investor2, toBN('10').mul(BASE));
-    await this.TokenA.mint(investor3, toBN('10').mul(BASE));
-    await this.TokenA.mint(investor4, toBN('10').mul(BASE));
-
-
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor3});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor4});
-
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor1 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('3').mul(BASE), { from: investor2 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('2').mul(BASE), { from: investor3 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor4 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('2').mul(BASE), { from: investor4 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('3').mul(BASE), { from: investor4 });
-
-    
-    let prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address);
-    expect(prices.map(p => p.toString())).to.have.members([
-      '33333333',
-      '66666666',
-      '100000000'
-    ])
-  })
-
-
-  it("StakeDex:swap", async() => {
-
-    await this.TokenA.mint(investor1, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor2, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor3, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor4, toBN('3').mul(BASE));
-
-
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor3});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor4});
-
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor1 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor2 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('3').mul(BASE), { from: investor3 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('2').mul(BASE), { from: investor4 });
-
-    let price1 = toBN('33333333');
-
-    let id = await this.Dex.getPairId(this.TokenA.address, this.TokenB.address);
-
-    let depth = await this.Dex.depth(id, price1);
-    expect(depth.toString()).to.eq(toBN('1999999980000000000').toString())
-      
-    await this.TokenB.mint(user, toBN('1').mul(BASE));
-    await this.TokenB.approve(this.Dex.address, constants.MAX_UINT256, { from: user });
-
-    let out = await this.Dex.calcOutAmount(this.TokenB.address, this.TokenA.address, toBN('1').mul(BASE))
-
-    await this.Dex.swap(this.TokenB.address, this.TokenA.address, toBN('1').mul(BASE), toBN('2').mul(BASE), { from: user })
-
-    let outAmount = await this.TokenA.balanceOf(user)
-
-    expect(outAmount.toString()).to.eq(out.amountOut.toString())
-
-
-    depth = await this.Dex.depth(id, price1);
-    expect(depth.toString()).to.eq(toBN('1001999980000000000').toString())
-  })
-
-  it("StakeDex:redeem", async() => {
-    await this.TokenA.mint(investor1, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor2, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor3, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor4, toBN('3').mul(BASE));
-
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor3});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor4});
-
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor1 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor2 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('3').mul(BASE), { from: investor3 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('2').mul(BASE), { from: investor4 });
-
-    let price1 = toBN('33333333');
-
-    let id = await this.Dex.getPairId(this.TokenA.address, this.TokenB.address);
-    
-    await this.TokenB.mint(user, toBN('2').mul(BASE));
-    await this.TokenB.approve(this.Dex.address, constants.MAX_UINT256, { from: user });
-
-    let depth1  = await this.Dex.depth(id, price1);
-
-    await this.Dex.swap(this.TokenB.address, this.TokenA.address, toBN('1').mul(BASE), toBN('2').mul(BASE), { from: user })
-    
-    // let rates = await this.Dex.getTradedRates(id, price1)
-    // console.log(rates.map(x => x.toString()))
-
-    await this.Dex.redeem(this.TokenA.address, this.TokenB.address, price1, { from: investor1 })
-    // await this.Dex.redeem(this.TokenA.address, this.TokenB.address, price1, { from: investor2 })
-
-    let amountB1 = await this.TokenB.balanceOf(investor1)
-    let amountB2 = await this.TokenB.balanceOf(investor2)
-
-    expect(amountB1.toString()).to.eq("499599999999999998")
-    expect(amountB2.toString()).to.eq("0")
-
-
-    let pending1 = await this.Dex.userOrders(investor1, id, price1);
-    let pending2 = await this.Dex.userOrders(investor2, id, price1);
-
-    expect(pending1.toString()).to.eq('500999990000000001')
-    expect(pending2.toString()).to.eq('999999990000000000')
-
-
-    await this.Dex.swap(this.TokenB.address, this.TokenA.address, toBN('1').mul(BASE).div(toBN('2')), toBN('0'), { from: user })
-
-
-    await this.Dex.redeem(this.TokenA.address, this.TokenB.address, price1, { from: investor1 })
-    amountB1_2 = await this.TokenB.balanceOf(investor1)
-    expect(amountB1_2.toString()).to.eq("749399999999999997")
-
-    await this.Dex.redeem(this.TokenA.address, this.TokenB.address, price1, { from: investor2 })
-    amountB2_2 = await this.TokenB.balanceOf(investor2)
-
-    expect(amountB2_2.toString()).to.eq("749399999999999997")
-  })
-
-
-  it("StakeDex:redeem case2", async() => {
-    await this.TokenA.mint(investor1, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor2, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor3, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor4, toBN('3').mul(BASE));
-
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor3});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor4});
-
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor1 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor2 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('3').mul(BASE), { from: investor3 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('2').mul(BASE), { from: investor4 });
-
-    let price1 = toBN('33333333');
-
-    let id = await this.Dex.getPairId(this.TokenA.address, this.TokenB.address);
-    
-    await this.TokenB.mint(user, toBN('2').mul(BASE));
-    await this.TokenB.approve(this.Dex.address, constants.MAX_UINT256, { from: user });
-
-    let depth1  = await this.Dex.depth(id, price1);
-
-    await this.Dex.swap(this.TokenB.address, this.TokenA.address, toBN('1').mul(BASE), toBN('2').mul(BASE), { from: user })
-    await this.Dex.swap(this.TokenB.address, this.TokenA.address, toBN('1').mul(BASE).div(toBN('2')), toBN('0'), { from: user })
-
-    await this.Dex.redeem(this.TokenA.address, this.TokenB.address, price1, { from: investor1 })
-    await this.Dex.redeem(this.TokenA.address, this.TokenB.address, price1, { from: investor2 })
-
-    let amountB1 = await this.TokenB.balanceOf(investor1)
-    expect(amountB1.toString()).to.eq("749399999999999997")
-
-    let amountB2 = await this.TokenB.balanceOf(investor2)
-    expect(amountB2.toString()).to.eq("749399999999999997")
-
-    let pending1 = await this.Dex.userOrders(investor1, id, price1);
-    let pending2 = await this.Dex.userOrders(investor2, id, price1);
-
-    expect(pending1.toString()).to.eq('251499990000000001')
-    expect(pending2.toString()).to.eq('251499990000000001')
-  })
-
-  it("StakeDex:removeLiquidity", async() => {
-    await this.TokenA.mint(investor1, toBN('3').mul(BASE));
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
-
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor1 });
-
-    let price1 = toBN('33333333');
-    let id = await this.Dex.getPairId(this.TokenA.address, this.TokenB.address);
-
-
-
-    await this.TokenB.mint(user, toBN('2').mul(BASE));
-    await this.TokenB.approve(this.Dex.address, constants.MAX_UINT256, { from: user });
-
-    let amountIN = toBN('500000000000000000')
-    await this.Dex.swap(this.TokenB.address, this.TokenA.address, amountIN, toBN('1').mul(BASE), { from: user })
-
-    await this.Dex.removeLiquidity(this.TokenA.address, this.TokenB.address, price1, { from: investor1 });
-
-    let balance1 = await this.TokenB.balanceOf(investor1);
-    expect(balance1.toString()).to.eq('499599999999999998')
-
-    let balance2 = await this.TokenA.balanceOf(investor1);
-    expect(balance2.toString()).to.eq('1502999985029999850')
-
-    let prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address)
-    expect(prices.length).to.eq(1)
-  })
-
-  it("StakeDex:removeLiquidity:2", async() => {
-    await this.TokenA.mint(investor1, toBN('6').mul(BASE));
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
-
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor1 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('2').mul(BASE), { from: investor1 });
-
-    let price1 = toBN('33333333');
-    let price2 = toBN('66666666');
-    let id = await this.Dex.getPairId(this.TokenA.address, this.TokenB.address);
-
-    
-    let prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address)
-    expect(prices[0].toString()).to.eq(price1.toString())
-    expect(prices[1].toString()).to.eq(price2.toString())
-
-    await this.Dex.removeLiquidity(this.TokenA.address, this.TokenB.address, price1, { from: investor1 });
-    prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address)
-    expect(prices[0].toString()).to.eq(price1.toString())
-
-    await this.Dex.removeLiquidity(this.TokenA.address, this.TokenB.address, price2, { from: investor1 });
-
-
-    prices = await this.Dex.getPrices(this.TokenA.address, this.TokenB.address)
-    expect(prices.length).to.eq(2)
+    let pos3 = await this.Dex.positions(tokenId1)
+    expect(pos3.pendingIn.toString()).to.eq('12041999997904200014') // 12041999997904200000
+    expect(pos3.pendingOut.toString()).to.eq('4013999998900000005') // 4013999998900000000
 
   })
-
-  it("StakeDex:getDepth", async() => {
-
-    await this.TokenA.mint(investor1, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor2, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor3, toBN('3').mul(BASE));
-    await this.TokenA.mint(investor4, toBN('3').mul(BASE));
-
-
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor1});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor2});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor3});
-    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: investor4});
-
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('1').mul(BASE), { from: investor1 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('3').mul(BASE), { from: investor2 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('2').mul(BASE), { from: investor3 });
-    await this.Dex.addLiquidity(this.TokenA.address, this.TokenB.address, toBN('3').mul(BASE), toBN('4').mul(BASE), { from: investor4 });
-
-    
-    let depths = await this.Dex.getDepth(this.TokenA.address, this.TokenB.address);
-
-    expect(depths.map(d=>d.amount.toString())).to.have.members([
-      '999999990000000000',
-      '1999999980000000000',
-      '3000000000000000000',
-      '3999999990000000000'
-    ])
-  })
-
-
 
 });
