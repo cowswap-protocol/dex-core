@@ -82,35 +82,25 @@ contract RouterV2 {
         (amountA, amountB) = _addLiquidity(tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin);
         address pair = PancakeLibrary.pairFor(factory, tokenA, tokenB);
 
-        if(tokenA == WETH && msg.value >= amountA) {
+        if(tokenA == WETH) {
             IWETH(WETH).deposit{value: amountA}();
             assert(IWETH(WETH).transfer(pair, amountA));
             if(msg.value > amountA) {
                 TransferHelper.safeTransferETH(msg.sender, msg.value - amountA);
             }
-        } else {
-            TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
-            //refund
-            if(msg.value > 0) {
-                TransferHelper.safeTransferETH(msg.sender, msg.value);
-            }
-        }
-
-        if(tokenB == WETH && msg.value >= amountB) {
+            TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
+        } else if(tokenB == WETH) {
             IWETH(WETH).deposit{value: amountB}();
             assert(IWETH(WETH).transfer(pair, amountB));
             if(msg.value > amountB) {
                 TransferHelper.safeTransferETH(msg.sender, msg.value - amountB);
             }
+            TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
         } else {
-
+            TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
             TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
-            //refund
-            if(msg.value > 0) {
-                TransferHelper.safeTransferETH(msg.sender, msg.value);
-            }
         }
-        
+
         liquidity = IPancakePair(pair).mint(to);
     }
 
@@ -125,9 +115,10 @@ contract RouterV2 {
         uint deadline,
         bool receiveETH
     ) public ensure(deadline) returns (uint amountA, uint amountB) {
+        receiveETH = receiveETH && (tokenA == WETH || tokenB == WETH);
         address pair = PancakeLibrary.pairFor(factory, tokenA, tokenB);
         IPancakePair(pair).transferFrom(msg.sender, pair, liquidity); // send liquidity to pair
-        (uint amount0, uint amount1) = IPancakePair(pair).burn(to);
+        (uint amount0, uint amount1) = IPancakePair(pair).burn(receiveETH ? address(this) : to);
         (address token0,) = PancakeLibrary.sortTokens(tokenA, tokenB);
         (amountA, amountB) = tokenA == token0 ? (amount0, amount1) : (amount1, amount0);
         require(amountA >= amountAMin, 'CowswapRouter: INSUFFICIENT_A_AMOUNT');
@@ -136,10 +127,11 @@ contract RouterV2 {
             if(tokenA == WETH) {
                 IWETH(WETH).withdraw(amountA);
                 TransferHelper.safeTransferETH(to, amountA);
-            }
-            if(tokenB == WETH) {
+                TransferHelper.safeTransfer(tokenB, to, amountB);
+            } else if(tokenB == WETH) {
                 IWETH(WETH).withdraw(amountB);
                 TransferHelper.safeTransferETH(to, amountB);
+                TransferHelper.safeTransfer(tokenA, to, amountA);
             }
         }
     }
@@ -170,10 +162,14 @@ contract RouterV2 {
     ) external payable ensure(deadline) returns (uint[] memory amounts) {
         address[] memory recipients;
         (amounts, recipients) = getAmountsOut(amountIn, path, to);
-
-        IERC20(path[0]).transferFrom(msg.sender, recipients[0], amounts[0]);
-
         require(amounts[path.length - 1] >= amountOutMin, "CowswapRouter: INSUFFICIENT_OUTPUT_AMOUNT");
+
+        if(msg.value == amountIn && path[0] == WETH) {
+            IWETH(WETH).deposit{value: amountIn}();
+            assert(IWETH(WETH).transfer(recipients[0], amountIn));
+        } else {
+            IERC20(path[0]).transferFrom(msg.sender, recipients[0], amounts[0]);
+        }
 
         receiveETH = receiveETH && path[path.length - 1] == WETH;
         if(receiveETH) {
@@ -220,10 +216,14 @@ contract RouterV2 {
     ) external payable ensure(deadline) returns(uint[] memory amounts) {
         address[] memory recipients;
         (amounts, recipients) = getAmountsIn(amountOut, path, to);
-
-        IERC20(path[0]).transferFrom(msg.sender, recipients[0], amounts[0]);
-
         require(amountInMax >= amounts[0], "CowswapRouter: EXCESSIVE_INPUT_AMOUNT");
+
+        if(msg.value >= amounts[0] && path[0] == WETH) {
+            IWETH(WETH).deposit{value: amounts[0]}();
+            assert(IWETH(WETH).transfer(recipients[0], amounts[0]));
+        } else {
+            IERC20(path[0]).transferFrom(msg.sender, recipients[0], amounts[0]);
+        }
 
         receiveETH = receiveETH && path[path.length - 1] == WETH;
         if(receiveETH) {
@@ -257,6 +257,9 @@ contract RouterV2 {
             TransferHelper.safeTransferETH(to, amountOut);
         }
 
+        if (msg.value > amounts[0]) TransferHelper.safeTransferETH(msg.sender, msg.value - amounts[0]);
+
+
         // pot.record(msg.sender, path[path.length - 1], amounts[amounts.length - 1]);
     }
 
@@ -273,7 +276,10 @@ contract RouterV2 {
 
         for(uint i; i < path.length - 1; i++) {
             uint ammOut = amm_calcOutAmount(path[i], path[i + 1], amounts[i]);
-            uint dexOut = dex_calcOutAmount(path[i], path[i + 1], amounts[i]);
+            (uint dexOut, uint unfilled) = dex_calcOutAmount(path[i], path[i + 1], amounts[i]);
+            if(unfilled > 0) {
+                dexOut = dexOut.add(amm_calcOutAmount(path[i], path[i + 1], unfilled));
+            }
             if(dexOut > 0 && dexOut > ammOut) {
                 amounts[i + 1] = dexOut;
                 recipients[i] = dex;
@@ -296,7 +302,7 @@ contract RouterV2 {
 
         for (uint i = path.length - 1; i > 0; i--) {
             uint ammIn = amm_calcInAmount(path[i - 1], path[i], amounts[i]);
-            uint dexIn = dex_calcInAmount(path[i - 1], path[i], amounts[i]);
+            (uint dexIn, ) = dex_calcInAmount(path[i - 1], path[i], amounts[i]);
             if(dexIn > 0 && ammIn > dexIn) {
                 amounts[i - 1] = dexIn;
                 recipients[i - 1] = dex;
@@ -307,14 +313,12 @@ contract RouterV2 {
         }
     }
 
-    function dex_calcOutAmount(address tokenIn, address tokenOut, uint amountIn) public view returns(uint) {
-        (uint256 outAmount, ) = StakeDex(dex).calcOutAmount(tokenIn, tokenOut, amountIn);
-        return outAmount;
+    function dex_calcOutAmount(address tokenIn, address tokenOut, uint amountIn) public view returns(uint, uint) {
+        return StakeDex(dex).calcOutAmount(tokenIn, tokenOut, amountIn);
     }
 
-    function dex_calcInAmount(address tokenIn, address tokenOut, uint amountOut) public view returns(uint) {
-        (uint256 inAmount, ) = StakeDex(dex).calcInAmount(tokenIn, tokenOut, amountOut);
-        return inAmount;
+    function dex_calcInAmount(address tokenIn, address tokenOut, uint amountOut) public view returns(uint, uint) {
+        return StakeDex(dex).calcInAmount(tokenIn, tokenOut, amountOut);
     }
 
     function amm_calcOutAmount(address tokenIn, address tokenOut, uint amountIn) public view returns(uint) {

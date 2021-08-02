@@ -876,7 +876,7 @@ contract CowBoy is ERC20("CowBoy", "COWBOY"), Ownable {
         }
     }
 
-    // Stake HST
+
     function enter(uint256 _amount) public {
         updateRewards();
         require(_amount > 0, "zero");
@@ -895,7 +895,7 @@ contract CowBoy is ERC20("CowBoy", "COWBOY"), Ownable {
         _updateReserves();
     }
 
-    // Claim back your HST.
+
     function leave(uint256 _share) public {
         updateRewards();
         require(_share > 0, "zero");

@@ -49,6 +49,8 @@ contract StakeDex is ERC721 {
     address public feeTo;
     address public gov;
 
+    address public WETH;
+
     uint public feeForTake = 20; // 0.2% 
     uint public feeForProvide = 10; // 0.10% to makers
     uint public feeForReserve = 10; // 0.10% reserved
@@ -168,7 +170,7 @@ contract StakeDex is ERC721 {
         address tokenOut,
         uint256 amountIn,
         uint256 amountOut
-    ) external lock returns(uint256 tokenId)
+    ) external payable lock returns(uint256 tokenId)
     {   
         require(amountIn > 0 && amountOut > 0, "ZERO");
 
@@ -251,6 +253,7 @@ contract StakeDex is ERC721 {
         Pair storage pair = getPair[position.pairId];
         _redeemTraded(tokenId);
         uint amountIn = getAmountOut(position.pairId, position.pendingOut, position.price);
+        pair.depth[position.price] = pair.depth[position.price].sub(position.pendingOut);
         if(amountIn > 0) {
             _withdraw(pair.tokenIn, owner, amountIn);
         }
@@ -493,7 +496,7 @@ contract StakeDex is ERC721 {
         address tokenIn, 
         address tokenOut, 
         uint amountOut
-    ) public view returns(uint256 amountIn, uint256 amountReturn) {
+    ) public view returns(uint256 amountIn, uint256 unspentOut) {
         uint id = getPairId[tokenOut][tokenIn];
         
         for(uint256 i = 0; i < getPair[id].prices.length; i++) {
@@ -512,14 +515,14 @@ contract StakeDex is ERC721 {
                 amountOut = 0;
             }
         }
-        amountReturn = amountOut;
+        unspentOut = amountOut;
     }
 
     function calcOutAmount(
         address tokenIn, 
         address tokenOut, 
         uint amountIn
-    ) public view returns(uint256 amountOut, uint256 amountReturn)
+    ) public view returns(uint256 amountOut, uint256 unspentIn)
     {
         uint id = getPairId[tokenOut][tokenIn];
 
@@ -542,7 +545,7 @@ contract StakeDex is ERC721 {
             }
         }
 
-        amountReturn = amountIn;
+        unspentIn = amountIn;
     }
 
     function positions(uint256 tokenId) 
