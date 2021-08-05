@@ -382,10 +382,10 @@ contract StakeDex is ERC721 {
 
     function swap(
         address tokenIn, 
-        address tokenOut, 
-        uint amountOutMin,
-        address to
-    ) external returns(uint256 amountOut)
+        address tokenOut,
+        address to,
+        address refundTo
+    ) external returns(uint256 amountOut, uint256 amountReturn)
     {   
         uint id = getPairId[tokenOut][tokenIn];
 
@@ -412,23 +412,26 @@ contract StakeDex is ERC721 {
                 break;
             }
         }
-        require(amountOut >= amountOutMin && amountOut > 0, "INSUFFICIENT_OUT_AMOUNT");
 
-        if(amountIn > 0) {
-            IERC20(tokenIn).transfer(msg.sender, amountIn); // refund
-        }
+        amountReturn = amountIn;
 
-        // IERC20(tokenIn).transferFrom(msg.sender, address(this), total.sub(amountIn));
+        // fee
         IERC20(tokenIn).transfer(feeTo, totalFee);
-        // IERC20(tokenOut).transfer(msg.sender, amountOut);
+
+        // swap out
         if(to != address(this)) {
             IERC20(tokenOut).transfer(to, amountOut);
         }
 
-        reserves[tokenOut] = reserves[tokenOut].sub(amountOut);
-        _updateReserve(tokenIn);
+        // refund
+        if(amountReturn > 0 && refundTo != address(this)) {
+            IERC20(tokenIn).transfer(refundTo == address(0) ? msg.sender : refundTo, amountReturn);
+        }
 
-        emit Swap(msg.sender, tokenIn, tokenOut, total.sub(amountIn), amountOut);
+        reserves[tokenIn] = reserves[tokenIn].add(total.sub(amountReturn));
+        reserves[tokenOut] = reserves[tokenOut].sub(amountOut);
+
+        emit Swap(msg.sender, tokenIn, tokenOut, total.sub(amountReturn), amountOut);
     }
 
 
@@ -496,7 +499,7 @@ contract StakeDex is ERC721 {
         address tokenIn, 
         address tokenOut, 
         uint amountOut
-    ) public view returns(uint256 amountIn, uint256 unspentOut) {
+    ) public view returns(uint256 amountIn, uint256 amountReturn) {
         uint id = getPairId[tokenOut][tokenIn];
         
         for(uint256 i = 0; i < getPair[id].prices.length; i++) {
@@ -505,24 +508,25 @@ contract StakeDex is ERC721 {
                 continue;
             }
 
-            uint256 amountWithFee = getAmountIn(id, amountOut, p).mul(10000 + feeForTake).div(10000);
+            uint256 amountWithFee = getAmountIn(id, amountOut, p).mul(10000).div(10000 - feeForTake);
 
             if(amountWithFee > getPair[id].depth[p]) {
                 amountIn += getPair[id].depth[p].add(getPair[id].depth[p].mul(feeForTake).div(10000));
                 amountOut = amountOut.sub(getAmountOut(id, getPair[id].depth[p], p));
             } else {
-                amountIn += getAmountIn(id, amountOut, p).mul(10000 + feeForTake).div(10000);
+                amountIn += getAmountIn(id, amountOut, p).mul(10000).div(10000 - feeForTake);
                 amountOut = 0;
+                break;
             }
         }
-        unspentOut = amountOut;
+        amountReturn = amountOut;
     }
 
     function calcOutAmount(
         address tokenIn, 
         address tokenOut, 
         uint amountIn
-    ) public view returns(uint256 amountOut, uint256 unspentIn)
+    ) public view returns(uint256 amountOut, uint256 amountReturn)
     {
         uint id = getPairId[tokenOut][tokenIn];
 
@@ -545,7 +549,7 @@ contract StakeDex is ERC721 {
             }
         }
 
-        unspentIn = amountIn;
+        amountReturn = amountIn;
     }
 
     function positions(uint256 tokenId) 

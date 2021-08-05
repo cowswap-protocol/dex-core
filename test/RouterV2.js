@@ -98,9 +98,9 @@ describe("RouterV2", function() {
   	await this.TokenA.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
   	await this.TokenB.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
   	await this.TokenC.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
-  	// A + B
+  	// A + B => 10000A + 10000B
   	await this.Router.addLiquidity(this.TokenA.address, this.TokenB.address, amountA, amountB, 0, 0, deployer, deadline, { from: deployer })
-  	// A + C
+  	// A + C => 10000A + 3000C
   	await this.Router.addLiquidity(this.TokenA.address, this.TokenC.address, amountA, amountC, 0, 0, deployer, deadline, { from: deployer })
 
   	let pairAC = await this.PancakeFactory.getPair(this.TokenA.address, this.TokenC.address)
@@ -108,6 +108,8 @@ describe("RouterV2", function() {
 
   	await this.TokenA.mint(user, amountA);
   	await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: user })
+
+    // A -> B => 10000A -> 10000B
   	await this.Dex.mint(this.TokenA.address, this.TokenB.address, amountA, amountB, { from: user })
 
   	let path = [ this.TokenB.address, this.TokenA.address, this.TokenC.address ]
@@ -121,6 +123,52 @@ describe("RouterV2", function() {
 
 		let traded = await this.TokenC.balanceOf(holder)
 		expect(traded.toString()).to.eq("29570771491265873664")
+  })
+
+  it("RouterV2:exactInput multiple routers", async() => {
+    let amountA = toBN('10000').mul(BASE)
+    let amountB = toBN('10000').mul(BASE)
+    let amountC = toBN('3000').mul(BASE)
+    let deadline = await time.latest()
+    deadline = deadline.add(toBN('10000'))
+
+    let dexA = toBN('100').mul(BASE)
+    let dexB = toBN('100').mul(BASE)
+
+    await this.TokenA.mint(deployer, amountA.mul(toBN('2')))
+    await this.TokenB.mint(deployer, amountB)
+    await this.TokenC.mint(deployer, amountC)
+
+    await this.TokenA.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
+    await this.TokenB.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
+    await this.TokenC.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
+    // A + B => 10000A + 10000B
+    await this.Router.addLiquidity(this.TokenA.address, this.TokenB.address, amountA, amountB, 0, 0, deployer, deadline, { from: deployer })
+    // A + C => 10000A + 3000C
+    await this.Router.addLiquidity(this.TokenA.address, this.TokenC.address, amountA, amountC, 0, 0, deployer, deadline, { from: deployer })
+
+    let pairAC = await this.PancakeFactory.getPair(this.TokenA.address, this.TokenC.address)
+
+
+    await this.TokenA.mint(user, amountA);
+    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: user })
+    // A -> B => 100A -> 100B
+    await this.Dex.mint(this.TokenA.address, this.TokenB.address, dexA, dexB, { from: user })
+
+    let path = [ this.TokenB.address, this.TokenA.address, this.TokenC.address ]
+    let amountIn = toBN('110').mul(BASE)
+    let out = await this.Router.getAmountsOut(amountIn, path, holder)
+    expect(out.recipients).to.have.members([this.Dex.address, pairAC, holder])
+    
+    // console.log(out.amounts.map(a=>a.toString()))
+    // console.log(out.unfilledAmounts.map(a=>a.toString()))
+
+    await this.TokenB.mint(holder, amountIn)
+    await this.TokenB.approve(this.Router.address, constants.MAX_UINT256, {from: holder})
+    await this.Router.exactInput(amountIn, 0, path, holder, deadline, { from: holder })
+
+    let traded = await this.TokenC.balanceOf(holder)
+    expect(traded.toString()).to.eq("32491704847806283310")
   })
 
   it("RouterV2:exactOutput", async() => {
@@ -137,9 +185,9 @@ describe("RouterV2", function() {
   	await this.TokenA.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
   	await this.TokenB.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
   	await this.TokenC.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
-  	// A + B
+  	// A + B => 10000A + 10000B
   	await this.Router.addLiquidity(this.TokenA.address, this.TokenB.address, amountA, amountB, 0, 0, deployer, deadline, { from: deployer })
-  	// A + C
+  	// A + C => 10000A + 1000C
   	await this.Router.addLiquidity(this.TokenA.address, this.TokenC.address, amountA, amountC, 0, 0, deployer, deadline, { from: deployer })
   	let pairAC = await this.PancakeFactory.getPair(this.TokenA.address, this.TokenC.address)
 
@@ -149,18 +197,74 @@ describe("RouterV2", function() {
   	await this.Dex.mint(this.TokenA.address, this.TokenB.address, amountA, amountB, { from: user })
 
   	let path = [ this.TokenB.address, this.TokenA.address, this.TokenC.address ]
-  	let amountInMax = toBN('200').mul(BASE)
-  	let amountOut = toBN('29570771491265873664')
-
-  	let input = await this.Router.getAmountsIn(amountOut, path, holder)
-  	expect(input.recipients).to.have.members([this.Dex.address, pairAC, holder])
+  	let amountInMax = toBN('381021519315530204822')
+  	let amountOut = toBN('100').mul(BASE)
 
 		await this.TokenB.mint(holder, amountInMax)
 		await this.TokenB.approve(this.Router.address, constants.MAX_UINT256, {from: holder})
 		await this.Router.exactOutput(amountOut, amountInMax, path, holder, deadline, { from: holder })
 
 		let traded = await this.TokenC.balanceOf(holder)
-		expect(traded.toString()).to.eq("29570654374082659724")
+		expect(traded.toString()).to.eq('100000000000000000000')
+    
+  })
+
+  it("RouterV2:exactOutput multiple routers", async() => {
+    let amountA = toBN('10000').mul(BASE)
+    let amountB = toBN('10000').mul(BASE)
+    let amountC = toBN('3000').mul(BASE)
+    let deadline = await time.latest()
+    deadline = deadline.add(toBN('10000'))
+
+    await this.TokenA.mint(deployer, amountA.mul(toBN('2')))
+    await this.TokenB.mint(deployer, amountB)
+    await this.TokenC.mint(deployer, amountC)
+
+    await this.TokenA.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
+    await this.TokenB.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
+    await this.TokenC.approve(this.Router.address, constants.MAX_UINT256, { from: deployer })
+    // A + B => 10000A + 10000B
+    await this.Router.addLiquidity(this.TokenA.address, this.TokenB.address, amountA, amountB, 0, 0, deployer, deadline, { from: deployer })
+    // A + C => 10000A + 3000C
+    await this.Router.addLiquidity(this.TokenA.address, this.TokenC.address, amountA, amountC, 0, 0, deployer, deadline, { from: deployer })
+    let pairAC = await this.PancakeFactory.getPair(this.TokenA.address, this.TokenC.address)
+
+    let dexA = toBN('100').mul(BASE)
+    let dexB = toBN('100').mul(BASE)
+    // Dex limit price order
+    await this.TokenA.mint(user, dexA)
+    await this.TokenA.approve(this.Dex.address, constants.MAX_UINT256, { from: user })
+    await this.Dex.mint(this.TokenA.address, this.TokenB.address, dexA, dexB, { from: user })
+
+    
+
+    let path = [ this.TokenB.address, this.TokenA.address, this.TokenC.address ]
+    let amountInMax = toBN('390661198408866653599')
+    let amountOut = toBN('110').mul(BASE)
+
+    // let ammOutA = await this.Router.amm_calcInAmount(this.TokenA.address, this.TokenC.address, amountOut)
+    // console.log("ammOutA===", ammOutA.toString())
+
+    // let dexOut = await this.Router.dex_calcInAmount(this.TokenB.address, this.TokenA.address, toBN('381576779318538560936'))
+    // console.log("dexOut amountIn ===", dexOut[0].toString())
+    // console.log("dexOut unfilled ===", dexOut[1].toString())
+
+    // let ammOut = await this.Router.amm_calcInAmount(this.TokenB.address, this.TokenA.address, toBN('281576779318538560936'))
+    // console.log("ammOut===", ammOut.toString())
+
+    // let input = await this.Router.getAmountsIn(amountOut, path, holder)
+
+    // console.log(input.amounts.map(a=>a.toString()))
+    // console.log(input.recipients.map(a=>a.toString()))
+    // console.log(input.unfilledAmounts.map(a=>a.toString()))
+
+    await this.TokenB.mint(holder, amountInMax)
+    await this.TokenB.approve(this.Router.address, constants.MAX_UINT256, {from: holder})
+    await this.Router.exactOutput(amountOut, amountInMax, path, holder, deadline, { from: holder })
+
+    let traded = await this.TokenC.balanceOf(holder)
+    expect(traded.toString()).to.eq('110000000000000000000')
+    
   })
 
 });

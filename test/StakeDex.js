@@ -52,10 +52,9 @@ describe("StakeDex", function() {
       expect(position.price.toString()).to.eq('3333333333')
       expect(position.pendingOut.toString()).to.eq('999999999900000000')
 
-      let id = await this.Dex.getPairId(this.TokenIn.address, this.TokenOut.address);
-      let pair = await this.Dex.pairs(id)
-
-      expect(pair.amounts.map(a => a.toString())).to.have.members(
+      // let id = await this.Dex.getPairId(this.TokenIn.address, this.TokenOut.address);
+      let pair = await this.Dex.pairs(this.TokenIn.address, this.TokenOut.address)
+      expect(pair.depths.map(a => a.toString())).to.have.members(
         ['999999999900000000']
       )
   })
@@ -84,14 +83,14 @@ describe("StakeDex", function() {
 
     let price = amountOut.mul(toBN(10**10)).div(amountIn)
 
-    let id = await this.Dex.getPairId(this.TokenIn.address, this.TokenOut.address);
-    let pair = await this.Dex.pairs(id)
-    let buyIn = pair.amounts[0].add(pair.amounts[0].mul(toBN(20)).div(toBN(10000)))
+    // let id = await this.Dex.getPairId(this.TokenIn.address, this.TokenOut.address);
+    let pair = await this.Dex.pairs(this.TokenIn.address, this.TokenOut.address)
+    let buyIn = pair.depths[0].add(pair.depths[0].mul(toBN(20)).div(toBN(10000)))
 
     await this.TokenOut.transfer(this.Dex.address, buyIn, { from: investor3 })
-    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3, { from: investor3 })
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, investor3, constants.ZERO_ADDRESS, { from: investor3 })
 
-    let takeFee = pair.amounts[0].mul(toBN(20)).div(toBN(10000))
+    let takeFee = pair.depths[0].mul(toBN(20)).div(toBN(10000))
     let realIn = buyIn.sub(takeFee)
     let realOut = realIn.mul(toBN(10**10)).div(price)
     expect(realOut.toString()).to.eq('3000000000000000000')
@@ -117,7 +116,7 @@ describe("StakeDex", function() {
     expect(buyIn.amountReturn.toString()).to.eq('0')
 
     this.TokenOut.transfer(this.Dex.address, buyIn.amountIn, { from: investor3 })
-    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, investor3, constants.ZERO_ADDRESS)
 
     let tradedIn = await this.TokenIn.balanceOf(investor3)
     expect(tradedIn.toString()).to.eq(takeOut.toString())
@@ -144,7 +143,7 @@ describe("StakeDex", function() {
     expect(buyIn.amountReturn.toString()).to.eq('0')
 
     this.TokenOut.transfer(this.Dex.address, buyIn.amountIn, { from: investor3 })
-    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, investor3, constants.ZERO_ADDRESS)
 
     let tradedIn = await this.TokenIn.balanceOf(investor3)
     expect(tradedIn.toString()).to.eq(takeOut.toString())
@@ -184,7 +183,7 @@ describe("StakeDex", function() {
     expect(buyIn.amountReturn.toString()).to.eq('0')
 
     await this.TokenOut.transfer(this.Dex.address, buyIn.amountIn, { from: investor3 })
-    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, investor3, constants.ZERO_ADDRESS)
 
     let tradedIn = await this.TokenIn.balanceOf(investor3)
     expect(tradedIn.toString()).to.eq(takeOut.toString())
@@ -242,7 +241,7 @@ describe("StakeDex", function() {
     let buyIn = await this.Dex.calcInAmount(this.TokenOut.address, this.TokenIn.address, takeOut)
 
     await this.TokenOut.transfer(this.Dex.address, buyIn.amountIn, { from: investor3 })
-    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, investor3, constants.ZERO_ADDRESS)
 
 
     let position1BeforeBurn = await this.Dex.positions(tokenId1)
@@ -290,7 +289,7 @@ describe("StakeDex", function() {
 
     let amount1 = toBN('5').mul(BASE)
     await this.TokenOut.transfer(this.Dex.address, amount1, { from: investor3 })
-    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, investor3, constants.ZERO_ADDRESS)
 
     let pos1 = await this.Dex.positions(tokenId1)
     
@@ -307,7 +306,7 @@ describe("StakeDex", function() {
 
     let amount2 = toBN('2').mul(BASE)
     await this.TokenOut.transfer(this.Dex.address, amount2, { from: investor3 })
-    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, 0, investor3)
+    await this.Dex.swap(this.TokenOut.address, this.TokenIn.address, investor3, constants.ZERO_ADDRESS)
 
     let pos3 = await this.Dex.positions(tokenId1)
     expect(pos3.pendingIn.toString()).to.eq('12041999997904200014') // 12041999997904200000
