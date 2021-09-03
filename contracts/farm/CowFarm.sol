@@ -48,11 +48,11 @@ contract CowFarm is Ownable {
 
 
     // Block number when bonus  period ends.
-    uint256 public bonusEndBlock;
+    // uint256 public bonusEndBlock;
     // Reward tokens created per block.
-    uint256 public rewardsPerBlock;
+    uint256 private rewardsPerBlock;
     // Bonus muliplier
-    uint256 public BONUS_MULTIPLIER = 1;
+    // uint256 public BONUS_MULTIPLIER = 1;
     // The migrator contract. It has a lot of power. Can only be set through governance (owner).
     IMigrator public migrator;
 
@@ -65,6 +65,8 @@ contract CowFarm is Ownable {
     // The block number when mining starts.
     uint256 public startBlock;
 
+    uint256 public endBlock;
+
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
@@ -73,13 +75,13 @@ contract CowFarm is Ownable {
         address _treasury,
         uint256 _rewardsPerBlock,
         uint256 _startBlock,
-        uint256 _bonusEndBlock
+        uint256 _endBlock
     ) public {
         treasury = ITreasury(_treasury);
         cowb = IERC20(treasury.cowb());
         rewardsPerBlock = _rewardsPerBlock;
-        bonusEndBlock = _bonusEndBlock;
         startBlock = _startBlock;
+        endBlock = _endBlock;
     }
 
     function poolLength() external view returns (uint256) {
@@ -111,6 +113,11 @@ contract CowFarm is Ownable {
         poolInfo[_pid].allocPoint = _allocPoint;
     }
 
+    function updateRewardsPerBlock(uint256 _rewardsPerBlock) public onlyOwner {
+        rewardsPerBlock = _rewardsPerBlock;
+        massUpdatePools();
+    }
+
     // Set the migrator contract. Can only be called by the owner.
     function setMigrator(IMigrator _migrator) public onlyOwner {
         migrator = _migrator;
@@ -128,18 +135,33 @@ contract CowFarm is Ownable {
         pool.lpToken = newLpToken;
     }
 
-    // Return reward multiplier over the given _from to _to block.
-    function getMultiplier(uint256 _from, uint256 _to) public view returns (uint256) {
-        if (_to <= bonusEndBlock) {
-            return _to.sub(_from).mul(BONUS_MULTIPLIER);
-        } else if (_from >= bonusEndBlock) {
-            return _to.sub(_from);
+    function getRewards(uint256 _from, uint256 _to) public view returns(uint256) {
+        require(_from <= _to, "From must be greater than to");
+        if(_to < startBlock) {
+            return 0;
+        } else if(_from < startBlock && _to <= endBlock) {
+            return _to.sub(startBlock).mul(rewardsPerBlock);
+        } else if(_from >= startBlock && _to <= endBlock) {
+            return _to.sub(_from).mul(rewardsPerBlock);
+        } else if(_from < endBlock && _to > endBlock) {
+            return endBlock.sub(_from).mul(rewardsPerBlock);
         } else {
-            return bonusEndBlock.sub(_from).mul(BONUS_MULTIPLIER).add(
-                _to.sub(bonusEndBlock)
-            );
+            return 0;
         }
     }
+
+    // Return reward multiplier over the given _from to _to block.
+    // function getMultiplier(uint256 _from, uint256 _to) public view returns (uint256) {
+    //     if (_to <= bonusEndBlock) {
+    //         return _to.sub(_from).mul(BONUS_MULTIPLIER);
+    //     } else if (_from >= bonusEndBlock) {
+    //         return _to.sub(_from);
+    //     } else {
+    //         return bonusEndBlock.sub(_from).mul(BONUS_MULTIPLIER).add(
+    //             _to.sub(bonusEndBlock)
+    //         );
+    //     }
+    // }
 
     function pendingRewards(uint256 _pid, address _user) external view returns (uint256) {
         PoolInfo storage pool = poolInfo[_pid];
@@ -148,8 +170,10 @@ contract CowFarm is Ownable {
         uint256 lpSupply = pool.lpToken.balanceOf(address(this));
         
         if (block.number > pool.lastRewardBlock && lpSupply != 0) {
-            uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
-            uint256 rewards = multiplier.mul(rewardsPerBlock).mul(pool.allocPoint).div(totalAllocPoint);
+            // uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
+            // uint256 rewards = multiplier.mul(rewardsPerBlock).mul(pool.allocPoint).div(totalAllocPoint);
+            uint256 rewards = getRewards(pool.lastRewardBlock, block.number).mul(pool.allocPoint).div(totalAllocPoint);
+
             accRewardPerShare = accRewardPerShare.add(rewards.mul(1e12).div(lpSupply));
         }
 
@@ -175,9 +199,9 @@ contract CowFarm is Ownable {
             pool.lastRewardBlock = block.number;
             return;
         }
-        uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
-        uint256 rewards = multiplier.mul(rewardsPerBlock).mul(pool.allocPoint).div(totalAllocPoint);
-
+        // uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
+        // uint256 rewards = multiplier.mul(getRewardsPerBlock()).mul(pool.allocPoint).div(totalAllocPoint);
+        uint256 rewards = getRewards(pool.lastRewardBlock, block.number).mul(pool.allocPoint).div(totalAllocPoint);
         uint256 rewarded = treasury.sendRewards(address(this), rewards);
 
         pool.accRewardPerShare = pool.accRewardPerShare.add(rewarded.mul(1e12).div(lpSupply));

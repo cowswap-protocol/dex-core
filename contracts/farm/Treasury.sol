@@ -46,10 +46,10 @@ contract Treasury is Ownable {
   function safeCowbTransfer(address to, uint256 amount) internal returns(uint256) {
     uint256 bal = cowb.balanceOf(address(this));
     if (amount > bal) {
-      cowb.transfer(to, bal);
+      cowb.safeTransfer(to, bal);
       return bal;
     } else {
-      cowb.transfer(to, amount);
+      cowb.safeTransfer(to, amount);
       return amount;
     }
   }

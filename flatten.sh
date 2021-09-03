@@ -8,6 +8,7 @@ truffle-flattener contracts/dex/ProofOfTrade.sol > flatten/ProofOfTrade.sol
 
 truffle-flattener contracts/dex/CowBoy.sol > flatten/CowBoy.sol
 truffle-flattener contracts/dex/CowFarm.sol > flatten/CowFarm.sol
+truffle-flattener contracts/dex/CowFund.sol > flatten/CowFund.sol
 
 truffle-flattener contracts/core/StakeDex.sol > flatten/StakeDex.sol
-truffle-flattener contracts/core/RouterV2.sol > flatten/RouterV2.sol
+truffle-flattener contracts/core/CowswapRouter.sol > flatten/CowswapRouter.sol

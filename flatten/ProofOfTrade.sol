@@ -1,4 +1,3 @@
-
 // SPDX-License-Identifier: MIT
 
 // File: @openzeppelin/contracts/math/SafeMath.sol
@@ -350,22 +349,10 @@ interface ITreasury {
 	function cowb() external view returns(address);
 }
 
-// File: contracts/dex/ICowBoy.sol
-
-
-pragma solidity ^0.6.12;
-
-interface ICowBoy {
-	function updateRewards() external;
-	function autoEnter(address to) external;
-}
-
 // File: contracts/dex/ProofOfTrade.sol
 
 
 pragma solidity ^0.6.12;
-
-
 
 
 
@@ -376,7 +363,6 @@ contract ProofOfTrade is Ownable {
 
 	IERC20 public cowb;
 	ITreasury public treasury;
-	ICowBoy public cowboy;
 
 	// date => token => volume
 	mapping (uint256 => mapping (address => uint)) public dayVolumes;
@@ -392,7 +378,7 @@ contract ProofOfTrade is Ownable {
 	bool public tradingEnable = true;
 	uint256 public tradingRewards = 1_000_000 * 1e18;
 	uint256 public totalTradingRewarded = 0;
-	uint256 public totalTradingRewardMax = 50000000000 * 1e18;
+	uint256 public totalTradingRewardMax = 100_000_000_000 * 1e18;
 	
 
 	struct PoolInfo {
@@ -405,6 +391,7 @@ contract ProofOfTrade is Ownable {
 	mapping (address => PoolInfo) public pools;
 
 	address[] private poolTokens;
+
 	
 
 	// user => token => date[]
@@ -417,13 +404,12 @@ contract ProofOfTrade is Ownable {
   }
 
   modifier onlyHolder(address holder) { 
-  	require (cowb.balanceOf(holder) >= potThreshold, "Not holder"); 
+  	require (cowb.balanceOf(holder) >= potThreshold, "Not COWB holder"); 
   	_; 
   }
   
-	constructor(address treasury_, address cowboy_) public {
+	constructor(address treasury_) public {
 		treasury = ITreasury(treasury_);
-		cowboy = ICowBoy(cowboy_);
 		cowb = IERC20(treasury.cowb());
 	}
 
@@ -482,7 +468,7 @@ contract ProofOfTrade is Ownable {
 		tradingRewards = val;
 	}
 
-	function setRotalTradingRewardMax(uint256 max) public onlyOwner {
+	function setTotalTradingRewardMax(uint256 max) public onlyOwner {
 		totalTradingRewardMax = max;
 	}
 
@@ -507,19 +493,28 @@ contract ProofOfTrade is Ownable {
 		return ts.sub(ts.mod(1 days));
 	}
 
+	function _giveaway(address user) internal {
+		if(!tradingEnable) {
+			return;
+		}
+		if(totalTradingRewarded >= totalTradingRewardMax) {
+			return;
+		}
+
+		traded[user] += 1;
+		if(traded[user] == 1) {
+			treasury.sendRewards(user, tradingRewards);
+			totalTradingRewarded = totalTradingRewarded.add(tradingRewards);
+		}
+
+		if(traded[user] == 5) {
+			treasury.sendRewards(user, tradingRewards.mul(5));
+			totalTradingRewarded = totalTradingRewarded.add(tradingRewards.mul(5));
+		}
+	}
 
 	function record(address user, address token, uint256 amount) public onlyRouter {
-		if(tradingEnable && totalTradingRewardMax > totalTradingRewarded) {
-			traded[user] += 1;
-			if(traded[user] == 1) {
-				treasury.sendRewards(user, tradingRewards);
-				totalTradingRewarded = totalTradingRewarded.add(tradingRewards);
-			}
-			if(traded[user] == 5) {
-				treasury.sendRewards(user, tradingRewards.mul(5));
-				totalTradingRewarded = totalTradingRewarded.add(tradingRewards.mul(5));
-			}
-		}
+		_giveaway(user);
 
 		if(!isMiningToken(token)) {
 			return;
@@ -535,19 +530,18 @@ contract ProofOfTrade is Ownable {
 
 		uint256 date = getDate(now);
 
-		if(pools[token].userDailyMax == 0) {
+		if(pools[token].userDailyMax > 0) {
 			if(userDayVolumes[user][date][token] >= pools[token].userDailyMax) {
 				return;
 			}
 			if(userDayVolumes[user][date][token].add(amount) > pools[token].userDailyMax) {
-				amount = amount.sub(userDayVolumes[user][date][token].add(amount).sub(pools[token].userDailyMax));
+				amount = pools[token].userDailyMax.sub(userDayVolumes[user][date][token]);
 			}
 		}
 		
 		dayVolumes[date][token] = dayVolumes[date][token].add(amount);
 		userDayVolumes[user][date][token] = userDayVolumes[user][date][token].add(amount);
 		
-
 		if(userDays[user][token].length == 0) {
 			userDays[user][token].push(date);
 		} else if(userDays[user][token][userDays[user][token].length - 1] < date) {
@@ -555,26 +549,11 @@ contract ProofOfTrade is Ownable {
 		}
 	}
 
-	// Havest cowb to user's wallet
+	// Havest
 	function claim(address user, address token) public onlyHolder(user) {
 		(, uint256 rewards) = getRewards(user, token);
 		require(rewards > 0, "No rewards");
 		treasury.sendRewards(user, rewards);
-		if(userDays[user][token][userDays[user][token].length - 1] == getDate(now)) {
-			userDays[user][token] = [ getDate(now) ];
-		} else {
-			delete userDays[user][token];
-		}
-	}
-
-	// Collect rewards and deposit to Cowboy
-	function collect(address user, address token) public onlyHolder(user) {
-		cowboy.updateRewards();
-		(, uint256 rewards) = getRewards(user, token);
-		require(rewards > 0, "No rewards");
-		treasury.sendRewards(address(cowboy), rewards);
-		cowboy.autoEnter(user);
-
 		if(userDays[user][token][userDays[user][token].length - 1] == getDate(now)) {
 			userDays[user][token] = [ getDate(now) ];
 		} else {
@@ -593,7 +572,7 @@ contract ProofOfTrade is Ownable {
 		PoolInfo memory pool = pools[token];
 		uint256 rewards = 0;
 
-		if(pool.startTime <= now && pool.endTime >= now) {
+		if(pool.startTime <= date && pool.endTime >= date) {
 			rewards = userDayVolumes[user][date][token].mul(pool.dailyRewards).div(dayVolumes[date][token]);	
 		}
 

@@ -1,35 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.6.12;
 
-import "./StakeDex.sol";
-
-// import "../interfaces/IPancakePair.sol";
 import "../interfaces/IPancakeFactory.sol";
-import "../interfaces/IWETH.sol";
-
 import "../lib/PancakeLibrary.sol";
-import "../lib/TransferHelper.sol";
 
-contract Liquidity {
+import "./Validation.sol";
+import "./Payment.sol";
+
+
+contract Liquidity is Validation, Payment {
     using SafeMath for uint256;
-    
+
     address public factory;
-    address public WETH;
-    address public ETH = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
 
-    modifier ensure(uint deadline) {
-        require(deadline >= block.timestamp, 'EXPIRED');
-        _;
-    }
-
-    constructor(address _factory, address _WETH/*, address _pot*/) public {
+    constructor(address _factory, address _WETH) public Payment(_WETH) {
         factory = _factory;
-        WETH = _WETH;
     }
 
-    receive() external payable {
-        // assert(msg.sender == WETH); // only accept ETH via fallback from the WETH contract
-    }
 
     function _addLiquidity(
         address tokenA,
@@ -70,29 +57,38 @@ contract Liquidity {
         address to,
         uint deadline
     ) external payable ensure(deadline) returns (uint amountA, uint amountB, uint liquidity) {
-        (amountA, amountB) = _addLiquidity(tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin);
-        address pair = PancakeLibrary.pairFor(factory, tokenA, tokenB);
-
-        if(tokenA == WETH) {
-            IWETH(WETH).deposit{value: amountA}();
-            assert(IWETH(WETH).transfer(pair, amountA));
-            if(msg.value > amountA) {
-                TransferHelper.safeTransferETH(msg.sender, msg.value - amountA);
-            }
-            TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
-        } else if(tokenB == WETH) {
-            IWETH(WETH).deposit{value: amountB}();
-            assert(IWETH(WETH).transfer(pair, amountB));
-            if(msg.value > amountB) {
-                TransferHelper.safeTransferETH(msg.sender, msg.value - amountB);
-            }
-            TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
-        } else {
-            TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
-            TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
-        }
-
+        (amountA, amountB) = _addLiquidity(
+            wrap(tokenA),
+            wrap(tokenB), 
+            amountADesired, 
+            amountBDesired, 
+            amountAMin, 
+            amountBMin
+        );
+        address pair = PancakeLibrary.pairFor(
+            factory, 
+            wrap(tokenA), 
+            wrap(tokenB)
+        );
+        _deposit(tokenA, msg.sender, pair, amountA);
+        _deposit(tokenB, msg.sender, pair, amountB);
         liquidity = IPancakePair(pair).mint(to);
+    }
+
+    function _removeLiquidityInternal(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        address to
+    ) internal returns(uint amountA, uint amountB) {
+        address pair = PancakeLibrary.pairFor(factory, wrap(tokenA), wrap(tokenB));
+        IPancakePair(pair).transferFrom(msg.sender, pair, liquidity); // send liquidity to pair
+        address _to = (tokenA == ETH || tokenB == ETH) ? address(this) : to;
+        uint amountABefore = IERC20(wrap(tokenA)).balanceOf(_to);
+        uint amountBBefore = IERC20(wrap(tokenB)).balanceOf(_to);
+        IPancakePair(pair).burn(_to);
+        amountA = IERC20(wrap(tokenA)).balanceOf(_to).sub(amountABefore);
+        amountB = IERC20(wrap(tokenB)).balanceOf(_to).sub(amountBBefore);
     }
 
 
@@ -103,27 +99,15 @@ contract Liquidity {
         uint amountAMin,
         uint amountBMin,
         address to,
-        uint deadline,
-        bool receiveETH
+        uint deadline
     ) public ensure(deadline) returns (uint amountA, uint amountB) {
-        receiveETH = receiveETH && (tokenA == WETH || tokenB == WETH);
-        address pair = PancakeLibrary.pairFor(factory, tokenA, tokenB);
-        IPancakePair(pair).transferFrom(msg.sender, pair, liquidity); // send liquidity to pair
-        (uint amount0, uint amount1) = IPancakePair(pair).burn(receiveETH ? address(this) : to);
-        (address token0,) = PancakeLibrary.sortTokens(tokenA, tokenB);
-        (amountA, amountB) = tokenA == token0 ? (amount0, amount1) : (amount1, amount0);
+        (amountA, amountB) = _removeLiquidityInternal(tokenA, tokenB, liquidity, to);
         require(amountA >= amountAMin, 'CowswapRouter: INSUFFICIENT_A_AMOUNT');
         require(amountB >= amountBMin, 'CowswapRouter: INSUFFICIENT_B_AMOUNT');
-        if(receiveETH) {
-            if(tokenA == WETH) {
-                IWETH(WETH).withdraw(amountA);
-                TransferHelper.safeTransferETH(to, amountA);
-                TransferHelper.safeTransfer(tokenB, to, amountB);
-            } else if(tokenB == WETH) {
-                IWETH(WETH).withdraw(amountB);
-                TransferHelper.safeTransferETH(to, amountB);
-                TransferHelper.safeTransfer(tokenA, to, amountA);
-            }
+
+        if(tokenA == ETH || tokenB == ETH) {
+            _withdraw(tokenA, to, amountA);
+            _withdraw(tokenB, to, amountB);
         }
     }
 
@@ -135,26 +119,9 @@ contract Liquidity {
         uint amountBMin,
         address to,
         uint deadline,
-        bool receiveETH,
         bool approveMax, uint8 v, bytes32 r, bytes32 s
     ) external returns (uint amountA, uint amountB) {
-        IPancakePair(PancakeLibrary.pairFor(factory, tokenA, tokenB)).permit(msg.sender, address(this), approveMax ? uint(-1) : liquidity, deadline, v, r, s);
-        (amountA, amountB) = removeLiquidity(tokenA, tokenB, liquidity, amountAMin, amountBMin, to, deadline, receiveETH);
-    }
-
-    function dex_calcOutAmount(address tokenIn, address tokenOut, uint amountIn) public view returns(uint, uint) {
-        return StakeDex(dex).calcOutAmount(tokenIn, tokenOut, amountIn);
-    }
-
-    function dex_calcInAmount(address tokenIn, address tokenOut, uint amountOut) public view returns(uint, uint) {
-        return StakeDex(dex).calcInAmount(tokenIn, tokenOut, amountOut);
-    }
-
-    function amm_calcOutAmount(address tokenIn, address tokenOut, uint amountIn) public view returns(uint) {
-        return PancakeLibrary.calcOutAmount(factory, tokenIn, tokenOut, amountIn);
-    }
-
-    function amm_calcInAmount(address tokenIn, address tokenOut, uint amountOut) public view returns(uint) {
-        return PancakeLibrary.calcInAmount(factory, tokenIn, tokenOut, amountOut);
+        IPancakePair(PancakeLibrary.pairFor(factory, wrap(tokenA), wrap(tokenB))).permit(msg.sender, address(this), approveMax ? uint(-1) : liquidity, deadline, v, r, s);
+        (amountA, amountB) = removeLiquidity(tokenA, tokenB, liquidity, amountAMin, amountBMin, to, deadline);
     }
 }

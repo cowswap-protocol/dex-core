@@ -14,16 +14,38 @@ contract CowBoy is ERC20("CowBoy", "COWBOY"), Ownable {
     IERC20 public cowb;
     ITreasury public treasury;
 
-    uint256 public rewardsPerBlock = 20000 * 1e18;
+    uint256 public rewardsPerBlock = 285388 * 1e18;
     uint256 public lastRewardBlock;
-    uint256 public cowbReserves;
+
+    uint256 public startBlock;
+    uint256 public endBlock;
+
+    uint256 public blocksPerYear = 10512000;
 
     event RewardAdded(uint256 amount);
 
     constructor(uint256 _startBlock, address _treasury) public {
+        startBlock = _startBlock;
+        endBlock = _startBlock + 4 * blocksPerYear;
         lastRewardBlock = _startBlock;
         treasury = ITreasury(_treasury);
         cowb = IERC20(treasury.cowb());
+    }
+
+    function getRewards(uint256 from, uint256 to) public view returns(uint256) {
+        require(from <= to, "From must be greater than to");
+
+        if(to < startBlock) {
+            return 0;
+        } else if(from < startBlock && to <= endBlock) {
+            return to.sub(startBlock).mul(rewardsPerBlock);
+        } else if(from >= startBlock && to <= endBlock) {
+            return to.sub(from).mul(rewardsPerBlock);
+        } else if(from < endBlock && to > endBlock) {
+            return endBlock.sub(from).mul(rewardsPerBlock);
+        } else {
+            return 0;
+        }
     }
 
     function updateRewardsPerBlock(uint256 val_) public onlyOwner {
@@ -34,42 +56,21 @@ contract CowBoy is ERC20("CowBoy", "COWBOY"), Ownable {
     function updateRewards() public {
         if (block.number > lastRewardBlock) {
             if(totalSupply() > 0) {
-                uint256 rewards = block.number.sub(lastRewardBlock).mul(rewardsPerBlock);
+                uint256 rewards = getRewards(lastRewardBlock, block.number);
                 if (rewards > 0) {
                     uint256 rewarded = treasury.sendRewards(address(this), rewards);
                     emit RewardAdded(rewarded);
                 }
             }
             lastRewardBlock = block.number;
-
-            _updateReserves();
         }
-    }
-
-    function _updateReserves() internal {
-        cowbReserves = cowb.balanceOf(address(this));
     }
 
     function price() public view returns(uint256) {
-        uint256 rewards = block.number > lastRewardBlock ? block.number.sub(lastRewardBlock).mul(rewardsPerBlock) : 0;
+        uint256 rewards = getRewards(lastRewardBlock, block.number);
         uint256 totalTokens = cowb.balanceOf(address(this)).add(rewards);
         uint256 totalShares = totalSupply();
         return totalTokens.mul(1e18).div(totalShares);
-    }
-
-    function autoEnter(address to) public {
-        uint256 totalTokens = cowb.balanceOf(address(this));
-        uint256 totalShares = totalSupply();        
-        if(totalTokens > cowbReserves) {
-            uint256 _amount = totalTokens.sub(cowbReserves);
-            if (totalShares == 0 || totalTokens == 0) {
-                _mint(to, _amount);
-            } 
-            else {
-                uint256 what = _amount.mul(totalShares).div(totalTokens);
-                _mint(to, what);
-            }
-        }
     }
 
     function enter(uint256 _amount) public {
@@ -86,8 +87,6 @@ contract CowBoy is ERC20("CowBoy", "COWBOY"), Ownable {
             _mint(msg.sender, what);
         }
         cowb.transferFrom(msg.sender, address(this), _amount);
-
-        _updateReserves();
     }
 
     function leave(uint256 _share) public {
@@ -97,7 +96,5 @@ contract CowBoy is ERC20("CowBoy", "COWBOY"), Ownable {
         uint256 what = _share.mul(cowb.balanceOf(address(this))).div(totalShares);
         _burn(msg.sender, _share);
         cowb.transfer(msg.sender, what);
-
-        _updateReserves();
     }
 }

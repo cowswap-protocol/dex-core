@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+
 // File: @openzeppelin/contracts/math/SafeMath.sol
 
 
@@ -1647,6 +1648,103 @@ interface IERC20 {
     event Approval(address indexed owner, address indexed spender, uint256 value);
 }
 
+// File: contracts/interfaces/IWETH.sol
+
+
+pragma solidity >=0.5.0;
+
+interface IWETH {
+    function deposit() external payable;
+    function transfer(address to, uint value) external returns (bool);
+    function withdraw(uint) external;
+}
+
+// File: contracts/lib/TransferHelper.sol
+
+
+pragma solidity >=0.6.0;
+
+// helper methods for interacting with ERC20 tokens and sending ETH that do not consistently return true/false
+library TransferHelper {
+    function safeApprove(address token, address to, uint value) internal {
+        // bytes4(keccak256(bytes('approve(address,uint256)')));
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0x095ea7b3, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'TransferHelper: APPROVE_FAILED');
+    }
+
+    function safeTransfer(address token, address to, uint value) internal {
+        // bytes4(keccak256(bytes('transfer(address,uint256)')));
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0xa9059cbb, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'TransferHelper: TRANSFER_FAILED');
+    }
+
+    function safeTransferFrom(address token, address from, address to, uint value) internal {
+        // bytes4(keccak256(bytes('transferFrom(address,address,uint256)')));
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0x23b872dd, from, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'TransferHelper: TRANSFER_FROM_FAILED');
+    }
+
+    function safeTransferETH(address to, uint value) internal {
+        (bool success,) = to.call{value:value}(new bytes(0));
+        require(success, 'TransferHelper: ETH_TRANSFER_FAILED');
+    }
+}
+
+// File: contracts/core/Payment.sol
+
+
+pragma solidity ^0.6.12;
+
+
+
+
+contract Payment {
+	address public ETH = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
+
+	address public WETH;
+
+	constructor(address _WETH) public {
+		WETH = _WETH;
+	}
+
+	receive() external payable {
+  }
+
+	function _deposit(address token, address payer, address recipient, uint amount) internal {
+      if(payer == recipient) { return; }
+      
+      if(token == ETH && address(this).balance >= amount) {
+        IWETH(WETH).deposit{value: amount}();
+        assert(IWETH(WETH).transfer(recipient, amount));
+      } else if(payer == address(this)) {
+        TransferHelper.safeTransfer(token, recipient, amount);
+      } else {
+        TransferHelper.safeTransferFrom(token, payer, recipient, amount);
+      }
+  }
+
+  function _withdraw(address token, address to, uint amount) internal {
+      if(token == ETH) {
+          uint balance = IERC20(WETH).balanceOf(address(this));
+          require(balance >= amount, "Insufficient WETH");
+          if(amount > 0) {
+            IWETH(WETH).withdraw(amount);
+            TransferHelper.safeTransferETH(to, amount);
+          }
+      } else {
+          TransferHelper.safeTransfer(token, to, amount);
+      }
+  }
+
+  function wrap(address token) internal view returns(address) {
+      return token == ETH ? WETH : token;
+  }
+
+  function isETH(address token) internal view returns(bool) {
+      return token == ETH;
+  }
+}
+
 // File: contracts/core/StakeDex.sol
 
 
@@ -1656,10 +1754,13 @@ pragma solidity ^0.6.12;
 
 
 
-contract StakeDex is ERC721 {
+contract StakeDex is ERC721('Cowswap Position', 'COW-POS'), Payment {
     using SafeMath for uint256;
 
-    uint public AMP = 1e18;
+    uint8 constant ETHER_IN = 1;
+    uint8 constant ETHER_OUT = 2;
+
+    uint public AMP = 1e22;
 
     struct Rate {
         uint256 traded;
@@ -1693,7 +1794,7 @@ contract StakeDex is ERC721 {
     mapping (uint256 => Pair) public getPair;
     mapping (address => mapping (address => uint)) public getPairId;
     
-    int8 public defaultDecimals = 10;
+    int8 public defaultDecimals = 16;
 
     address public feeTo;
     address public gov;
@@ -1705,19 +1806,15 @@ contract StakeDex is ERC721 {
     mapping (address => uint256) public reserves;
 
     struct Position {
-        // the nonce for permits
-        uint96 nonce;
-        // the address that is approved for spending this token
-        address operator;
         uint256 pairId;
-
-        // uint256 amountIn;
         uint256 price;
         uint256 pendingOut;
         uint256 rateRedeemedIndex;
+        uint8 etherInOrOut;
     }
 
     uint256 private _nextId = 1;
+    uint256 public nextPairId = 0;
 
     mapping (uint256 => Position) private _positions;
     
@@ -1749,9 +1846,17 @@ contract StakeDex is ERC721 {
     }
     
 
-    constructor(address feeTo_) public ERC721('Cowswap Positions', 'COW-POS') {
+    constructor(address feeTo_, address _WETH) public Payment(_WETH) {
         gov = msg.sender;
         feeTo = feeTo_;
+    }
+
+    function setGov(address _newGov) external onlyGov {
+        gov = _newGov;
+    }
+
+    function setBaseURI(string memory _baseURI) external onlyGov {
+        _setBaseURI(_baseURI);
     }
 
     function setFees(uint256 take_, uint256 provide_, uint256 reserve_) public onlyGov {
@@ -1762,8 +1867,18 @@ contract StakeDex is ERC721 {
     }
 
     function createPair(address tokenIn, address tokenOut) public {
-        getPairId[tokenIn][tokenOut] += 1;
+        tokenIn = wrap(tokenIn);
+        tokenOut = wrap(tokenOut);
+        require(IERC20(tokenIn).decimals() <= 18, "TokenIn decimals > 18");
+        require(IERC20(tokenOut).decimals() <= 18, "TokenOut decimals > 18");
 
+        if(getPairId[tokenIn][tokenOut] > 0) {
+            return;
+        }
+
+        nextPairId++;
+        getPairId[tokenIn][tokenOut] = nextPairId;
+        
         uint256 id = getPairId[tokenIn][tokenOut];
 
         int8 decimals = int8(defaultDecimals) + int8(IERC20(tokenIn).decimals()) - int8(IERC20(tokenOut).decimals());
@@ -1777,9 +1892,31 @@ contract StakeDex is ERC721 {
         emit CreatePair(tokenIn, tokenOut, id);
     }
 
-    function updatePairDecimals(address tokenIn, address tokenOut, int8 decimals_) public {
-        require(gov == msg.sender, "Not gov");
-        getPair[getPairId[tokenIn][tokenOut]].decimals = int8(decimals_) + int8(IERC20(tokenIn).decimals()) - int8(IERC20(tokenOut).decimals());
+    function increasePairDecimals(address tokenIn, address tokenOut, int8 pairDecimals) external onlyGov {
+        int8 decimals = int8(pairDecimals) + int8(IERC20(tokenIn).decimals()) - int8(IERC20(tokenOut).decimals());
+        int8 old = getPair[getPairId[tokenIn][tokenOut]].decimals;
+
+        require(decimals > old, "Can not increase deciamls");
+
+        Pair storage pair = getPair[getPairId[tokenIn][tokenOut]];
+        pair.decimals = decimals;
+        for(uint256 i = 0; i < pair.prices.length; i++) {
+            pair.prices[i] = pair.prices[i].mul(10 ** uint(decimals - old));
+        }
+    }
+
+    function decreasePairDecimals(address tokenIn, address tokenOut, int8 pairDecimals) external onlyGov {
+        int8 decimals = int8(pairDecimals) + int8(IERC20(tokenIn).decimals()) - int8(IERC20(tokenOut).decimals());
+        int8 old = getPair[getPairId[tokenIn][tokenOut]].decimals;
+        require(decimals < old, "Can not decrease deciamls");
+        Pair storage pair = getPair[getPairId[tokenIn][tokenOut]];
+        require(pair.prices.length == 0, "Prices is not empty");
+        pair.decimals = decimals;
+    }
+
+
+    function updateDefaultDecimals(int8 decimals_) external onlyGov {
+        defaultDecimals = decimals_;
     }
 
     function _updateReserve(address token) internal {
@@ -1787,26 +1924,18 @@ contract StakeDex is ERC721 {
     }
 
     function _deposit(address token, address from, uint256 amount) internal returns(uint256) {
-        uint256 beforeBalance = IERC20(token).balanceOf(address(this));
-        IERC20(token).transferFrom(from, address(this), amount);
-        uint256 afterBalance = IERC20(token).balanceOf(address(this));
-        return afterBalance.sub(beforeBalance);
-    }
-
-    function _withdraw(address token, address to, uint256 amount) internal {
-        require(IERC20(token).balanceOf(address(this)) >= amount, "Insufficient balance");
-        IERC20(token).transfer(to, amount);
+        uint256 balanceBefore = IERC20(wrap(token)).balanceOf(address(this));
+        _deposit(token, from, address(this), amount);
+        return IERC20(wrap(token)).balanceOf(address(this)).sub(balanceBefore);
     }
 
     function _recordRateIndex(uint256 id, uint256 price) internal returns(uint256 rateIndex) {
         Pair storage pair = getPair[id];
         uint256 size = pair.tradedRateStored[price].length;
         if(pair.tradedRateStored[price][size - 1].traded == 0) {
-            // position.rateRedeemedIndex = size - 1;
             rateIndex = size - 1;
         } else {
             pair.tradedRateStored[price].push(ZERO);
-            // position.rateRedeemedIndex = size;
             rateIndex = size;
         }
     }
@@ -1817,8 +1946,13 @@ contract StakeDex is ERC721 {
         address tokenOut,
         uint256 amountIn,
         uint256 amountOut
-    ) external lock returns(uint256 tokenId)
+    ) external payable lock returns(uint256 tokenId)
     {   
+        bool isEtherIn = isETH(tokenIn);
+        bool isEtherOut = isETH(tokenOut);
+        tokenIn = wrap(tokenIn);
+        tokenOut = wrap(tokenOut);
+
         require(amountIn > 0 && amountOut > 0, "ZERO");
 
         if(getPairId[tokenIn][tokenOut] == 0) {
@@ -1827,7 +1961,7 @@ contract StakeDex is ERC721 {
         uint256 id = getPairId[tokenIn][tokenOut];
         Pair storage pair = getPair[id];
 
-        amountIn = _deposit(tokenIn, msg.sender, amountIn);
+        amountIn = _deposit(isEtherIn ? ETH : tokenIn, msg.sender, amountIn);
 
         uint256 price;
 
@@ -1858,15 +1992,16 @@ contract StakeDex is ERC721 {
         position.price = price;
         position.pendingOut = amountOut;
         position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
+        position.etherInOrOut = isEtherIn ? uint8(1) : (isEtherOut ? uint8(2) : uint8(0));
 
         emit IncreasePosition(msg.sender, tokenIn, tokenOut, price, amountIn);
     }
 
-    function increasePosition(uint256 tokenId, uint256 amountIn) external lock {
+    function increasePosition(uint256 tokenId, uint256 amountIn) external payable lock {
         _redeemTraded(tokenId);
         Position storage position = _positions[tokenId];
         Pair storage pair = getPair[position.pairId];
-        amountIn = _deposit(pair.tokenIn, msg.sender, amountIn);
+        amountIn = _deposit(position.etherInOrOut == ETHER_IN ? ETH : pair.tokenIn, msg.sender, amountIn);
         uint256 amountOut = getAmountIn(position.pairId, amountIn, position.price);
         pair.depth[position.price] = pair.depth[position.price].add(amountOut);
 
@@ -1879,16 +2014,21 @@ contract StakeDex is ERC721 {
 
 
     function decreasePosition(uint256 tokenId, uint256 amountIn) external lock isAuthorizedForToken(tokenId) {
+        require(amountIn > 0, "ZERO");
         _redeemTraded(tokenId);
         Position storage position = _positions[tokenId];
         Pair storage pair = getPair[position.pairId];
         uint256 amountOut = getAmountIn(position.pairId, amountIn, position.price);
         require(position.pendingOut >= amountOut, "Insufficient position");
-        pair.depth[position.price] = pair.depth[position.price].sub(amountOut);
 
+        pair.depth[position.price] = pair.depth[position.price].sub(amountOut);
         position.pendingOut = position.pendingOut.sub(amountOut);
         position.rateRedeemedIndex = _recordRateIndex(position.pairId, position.price);
-        _withdraw(pair.tokenIn, ownerOf(tokenId), amountIn);
+        
+        // recalculate amountIn to prevent withdrawing with insufficient input amount
+        uint calcAmountIn = getAmountOut(position.pairId, amountOut, position.price);
+        _withdraw(position.etherInOrOut == ETHER_IN ? ETH : pair.tokenIn, ownerOf(tokenId), calcAmountIn);
+
         _updateReserve(pair.tokenIn);
 
         emit DecreasePosition(msg.sender, pair.tokenIn, pair.tokenOut, position.price, amountIn);
@@ -1899,44 +2039,60 @@ contract StakeDex is ERC721 {
         Position storage position = _positions[tokenId];
         Pair storage pair = getPair[position.pairId];
         _redeemTraded(tokenId);
-        uint amountIn = getAmountOut(position.pairId, position.pendingOut, position.price);
-        if(amountIn > 0) {
-            _withdraw(pair.tokenIn, owner, amountIn);
-        }
-        // redeem
-        _burn(tokenId);
-        delete _positions[tokenId];
+        
+        uint amountIn;
 
+        if(pair.depth[position.price] >= position.pendingOut) {
+            amountIn = getAmountOut(position.pairId, position.pendingOut, position.price);
+            pair.depth[position.price] = pair.depth[position.price].sub(position.pendingOut);
+        } else {
+            amountIn = getAmountOut(position.pairId, pair.depth[position.price], position.price);
+            pair.depth[position.price] = 0;
+        }
+
+        if(amountIn > 0) {
+            _withdraw(position.etherInOrOut == ETHER_IN ? ETH : pair.tokenIn, owner, amountIn);
+        }
+        
+        // burn
+        _burn(tokenId);
+
+        _updateReserve(pair.tokenIn);
+        
         emit DecreasePosition(msg.sender, pair.tokenIn, pair.tokenOut, position.price, amountIn);
+        
+        delete _positions[tokenId];
     }
 
     function _redeemTraded(uint256 tokenId) internal {
         Position storage position = _positions[tokenId];
         Pair storage pair = getPair[position.pairId];
+        if(position.pendingOut == 0){
+            return;
+        }
 
         address owner = ownerOf(tokenId);
-
-        require(position.pendingOut > 0, "No Liquidity");
 
         Rate[] storage rates = pair.tradedRateStored[position.price];
 
         uint256 accumlatedRate = 0;
         uint256 accumlatedRateFee = 0;
-        uint256 startIndex = position.rateRedeemedIndex;
 
+        for(uint256 i = position.rateRedeemedIndex; i < rates.length; i++) {
+            accumlatedRateFee = calcRate(rates[i].fee, accumlatedRate).add(accumlatedRateFee);
+            accumlatedRate = calcRate(rates[i].traded, accumlatedRate).add(accumlatedRate);
 
-        for(uint256 i = startIndex; i < rates.length; i++) {
-            accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
-            accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
             if(rates[i].traded == AMP) {
                 break;
             }
         }
+
         uint256 filled = position.pendingOut.mul(accumlatedRate).div(AMP);
         uint256 fee = position.pendingOut.mul(accumlatedRateFee).div(AMP);
+
         if(filled > 0) {
-            _withdraw(pair.tokenOut, owner, filled.add(fee));
             position.pendingOut = position.pendingOut.sub(filled);
+            _withdraw(position.etherInOrOut == ETHER_OUT ? ETH : pair.tokenOut, owner, filled.add(fee));
 
             _updateReserve(pair.tokenOut);
 
@@ -1982,7 +2138,6 @@ contract StakeDex is ERC721 {
 
         if(!pushed) {
             priceArray.push(price);
-            // priceArray[len - 1] = price;
         }
     }
 
@@ -2028,10 +2183,10 @@ contract StakeDex is ERC721 {
 
     function swap(
         address tokenIn, 
-        address tokenOut, 
-        uint amountOutMin,
-        address to
-    ) external returns(uint256 amountOut)
+        address tokenOut,
+        address to,
+        address refundTo
+    ) external lock returns(uint256 amountOut, uint256 amountReturn)
     {   
         uint id = getPairId[tokenOut][tokenIn];
 
@@ -2041,6 +2196,7 @@ contract StakeDex is ERC721 {
 
         uint total = amountIn;
         uint totalFee = 0;
+        uint totalProvideFee = 0;
 
         for(uint256 i = 0; i < pair.prices.length; i++) {
             uint256 p = pair.prices[i];
@@ -2048,9 +2204,10 @@ contract StakeDex is ERC721 {
             if(pair.depth[p] == 0) {
                 continue;
             }
-            (uint _amountReturn, uint _amountOut, uint _reserveFee) = _swapWithFixedPrice(id, amountIn, p);
+            (uint _amountReturn, uint _amountOut, uint _reserveFee, uint _provideFee) = _swapWithFixedPrice(id, amountIn, p);
 
             totalFee = totalFee.add(_reserveFee);
+            totalProvideFee = totalProvideFee.add(_provideFee);
             amountOut = amountOut.add(_amountOut);
             amountIn = _amountReturn;
 
@@ -2058,23 +2215,26 @@ contract StakeDex is ERC721 {
                 break;
             }
         }
-        require(amountOut >= amountOutMin && amountOut > 0, "INSUFFICIENT_OUT_AMOUNT");
 
-        if(amountIn > 0) {
-            IERC20(tokenIn).transfer(msg.sender, amountIn); // refund
-        }
+        amountReturn = amountIn;
 
-        // IERC20(tokenIn).transferFrom(msg.sender, address(this), total.sub(amountIn));
+        // fee
         IERC20(tokenIn).transfer(feeTo, totalFee);
-        // IERC20(tokenOut).transfer(msg.sender, amountOut);
+
+        // swap out
         if(to != address(this)) {
             IERC20(tokenOut).transfer(to, amountOut);
         }
 
-        reserves[tokenOut] = reserves[tokenOut].sub(amountOut);
-        _updateReserve(tokenIn);
+        // refund
+        if(amountReturn > 0 && refundTo != address(this)) {
+            IERC20(tokenIn).transfer(refundTo == address(0) ? msg.sender : refundTo, amountReturn);
+        }
 
-        emit Swap(msg.sender, tokenIn, tokenOut, total.sub(amountIn), amountOut);
+        reserves[tokenIn] = reserves[tokenIn].add(total.sub(amountReturn).sub(totalProvideFee));
+        reserves[tokenOut] = reserves[tokenOut].sub(amountOut);
+
+        emit Swap(msg.sender, tokenIn, tokenOut, total.sub(amountReturn), amountOut);
     }
 
 
@@ -2082,42 +2242,43 @@ contract StakeDex is ERC721 {
         uint id,
         uint amountIn, 
         uint price
-    ) internal returns(uint /*amountReturn*/, uint amountOut, uint reserveFee) {
+    ) internal returns(uint /*amountReturn*/, uint amountOut, uint reserveFee, uint provideFee) {
         Pair storage pair = getPair[id];
-
-        uint takeFee = pair.depth[price].mul(feeForTake).div(10000);
+        
         uint256 rateTrade;
         uint256 rateFee;
-        
-        if(amountIn >= pair.depth[price].add(takeFee)) {
-            reserveFee = pair.depth[price].mul(feeForReserve).div(10000);
+        uint256 amount;
+        uint256 amountInMaxWithFee = pair.depth[price].mul(10000).div(10000 - feeForTake);
 
-            rateTrade = AMP;
-            rateFee = takeFee.sub(reserveFee).mul(AMP).div(pair.depth[price]);
-
-            amountOut += getAmountOut(id, pair.depth[price], price);
-
-            amountIn = amountIn.sub(pair.depth[price]).sub(takeFee);
-            pair.depth[price] = 0;
+        if(amountIn >= amountInMaxWithFee) {
+            amount = amountInMaxWithFee;
+            amountIn = amountIn.sub(amountInMaxWithFee);
         } else {
-            takeFee = amountIn.mul(feeForTake).div(10000);
-            reserveFee = amountIn.mul(feeForReserve).div(10000);
-
-            rateTrade = amountIn.sub(takeFee).mul(AMP).div(pair.depth[price]);
-            rateFee = takeFee.sub(reserveFee).mul(AMP).div(pair.depth[price]);
-
-            amountOut += getAmountOut(id, amountIn.sub(takeFee), price);
-
-            pair.depth[price] = pair.depth[price].sub(amountIn.sub(takeFee));
+            amount = amountIn;
             amountIn = 0;
+        }
+
+        uint takeFee = amount.mul(feeForTake).div(10000);
+        provideFee = amount.mul(feeForProvide).div(10000);
+        reserveFee = takeFee.sub(provideFee);
+
+        rateTrade = amount.sub(takeFee).mul(AMP).div(pair.depth[price]);
+        rateFee = provideFee.mul(AMP).div(pair.depth[price]);
+
+        amountOut = getAmountOut(id, amount.sub(takeFee), price);
+
+        if(amountIn >= amountInMaxWithFee) {
+            pair.depth[price] = 0; 
+        } else {
+            pair.depth[price] = pair.depth[price].sub(amount.sub(takeFee));
         }
 
         Rate storage rate = pair.tradedRateStored[price][pair.tradedRateStored[price].length - 1];
 
-        rate.fee += calcRate(rateFee, rate.traded);
-        rate.traded += calcRate(rateTrade, rate.traded);
+        rate.fee = rate.fee.add(calcRate(rateFee, rate.traded));
+        rate.traded = rate.traded.add(calcRate(rateTrade, rate.traded));
 
-        return (amountIn, amountOut, reserveFee);
+        return (amountIn, amountOut, reserveFee, provideFee);
     }
 
     function getAmountOut(uint256 id, uint256 amountIn, uint256 price) public view returns(uint256) {
@@ -2150,15 +2311,16 @@ contract StakeDex is ERC721 {
             if(getPair[id].depth[p] == 0) {
                 continue;
             }
+            uint256 amountOutMax = getAmountOut(id, getPair[id].depth[p], p);
 
-            uint256 amountWithFee = getAmountIn(id, amountOut, p).mul(10000 + feeForTake).div(10000);
-
-            if(amountWithFee > getPair[id].depth[p]) {
-                amountIn += getPair[id].depth[p].add(getPair[id].depth[p].mul(feeForTake).div(10000));
-                amountOut = amountOut.sub(getAmountOut(id, getPair[id].depth[p], p));
+            if(amountOut > amountOutMax) {
+                amountIn = getPair[id].depth[p].mul(10000).div(10000 - feeForTake).add(amountIn);
+                amountOut = amountOut.sub(amountOutMax);
             } else {
-                amountIn += getAmountIn(id, amountOut, p).mul(10000 + feeForTake).div(10000);
+                uint inputAmount = getAmountIn(id, amountOut, p);
+                amountIn = inputAmount.mul(10000).div(10000 - feeForTake).add(amountIn);
                 amountOut = 0;
+                break;
             }
         }
         amountReturn = amountOut;
@@ -2178,14 +2340,14 @@ contract StakeDex is ERC721 {
                 continue;
             }
 
-            uint256 amountWithFee = getPair[id].depth[p].add(getPair[id].depth[p].mul(feeForTake).div(10000));
+            uint256 amountWithFee = getPair[id].depth[p].mul(10000).div(10000 - feeForTake);
 
             if(amountIn >= amountWithFee) {
-                amountOut += getAmountOut(id, getPair[id].depth[p], p);
+                amountOut = getAmountOut(id, getPair[id].depth[p], p).add(amountOut);
                 amountIn = amountIn.sub(amountWithFee);
             } else {
                 uint256 fee = amountIn.mul(feeForTake).div(10000);
-                amountOut += getAmountOut(id, amountIn.sub(fee), p);
+                amountOut = getAmountOut(id, amountIn.sub(fee), p).add(amountOut);
                 amountIn = 0;
                 break;
             }
@@ -2198,8 +2360,6 @@ contract StakeDex is ERC721 {
         external 
         view 
         returns(
-            uint256 nonce,
-            address operator,
             uint256 pairId,
             uint256 pendingIn,
             uint256 price,
@@ -2208,7 +2368,10 @@ contract StakeDex is ERC721 {
             address tokenIn,
             address tokenOut,
             uint256 filled,
-            uint256 feeRewarded
+            uint256 feeRewarded,
+            uint8 etherInOrOut,
+            int8 decimals
+
         ) 
     {
         require(_exists(tokenId), "No position");
@@ -2224,14 +2387,16 @@ contract StakeDex is ERC721 {
 
             uint256 accumlatedRate = 0;
             uint256 accumlatedRateFee = 0;
-            uint256 startIndex = position.rateRedeemedIndex;
-            for(uint256 i = startIndex; i < rates.length; i++) {
-                accumlatedRateFee += calcRate(rates[i].fee, i == startIndex ? 0 : rates[i - 1].traded);
-                accumlatedRate += calcRate(rates[i].traded, i == startIndex ? 0 : rates[i - 1].traded);
+
+            for(uint256 i = position.rateRedeemedIndex; i < rates.length; i++) {
+                accumlatedRateFee = calcRate(rates[i].fee, accumlatedRate).add(accumlatedRateFee);
+                accumlatedRate = calcRate(rates[i].traded, accumlatedRate).add(accumlatedRate);
+
                 if(rates[i].traded == AMP) {
                     break;
                 }
             }
+
             filled = position.pendingOut.mul(accumlatedRate).div(AMP);
             feeRewarded = position.pendingOut.mul(accumlatedRateFee).div(AMP);
             pendingOut = position.pendingOut.sub(filled);
@@ -2240,8 +2405,6 @@ contract StakeDex is ERC721 {
         pendingIn = getAmountOut(position.pairId, pendingOut, position.price);
 
         return (
-            position.nonce,
-            position.operator,
             position.pairId,
             pendingIn,
             position.price,
@@ -2250,7 +2413,9 @@ contract StakeDex is ERC721 {
             pair.tokenIn,
             pair.tokenOut,
             filled,
-            feeRewarded
+            feeRewarded,
+            position.etherInOrOut,
+            pair.decimals
         );
     }
 
@@ -2269,8 +2434,29 @@ contract StakeDex is ERC721 {
         decimals = pair.decimals;
         prices = pair.prices;
         depths = new uint256[](prices.length);
+
         for(uint256 i = 0; i < prices.length; i++) {
             depths[i] = pair.depth[prices[i]];
+        }
+    }
+
+    function getRates(address tokenIn, address tokenOut, uint price) 
+    public
+    view
+    returns(
+        uint[] memory tradedRates,
+        uint[] memory feeRates
+    ) {
+        uint id = getPairId[tokenIn][tokenOut];
+        Pair storage pair = getPair[id];
+        Rate[] storage rates = pair.tradedRateStored[price];
+
+        tradedRates = new uint[](rates.length);
+        feeRates  = new uint[](rates.length);
+
+        for(uint i = 0; i < rates.length; i++) {
+            tradedRates[i] = rates[i].traded;
+            feeRates[i] = rates[i].fee;
         }
     }
 }
